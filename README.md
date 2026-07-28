@@ -28,7 +28,7 @@ still to come.
 | Write executor | Not started, deliberately |
 | OAuth 2.0 + PKCE | Not started — bearer token in the interim |
 
-194 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
+206 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
 see below.
 
 ## Running it
@@ -45,6 +45,16 @@ node dist/index.js
 It reads the vault's storage settings from the vault itself, replicates the
 whole database locally, waits for that first pass, then serves. `deploy/`
 holds a Dockerfile and a Compose file for a Traefik-fronted stack.
+
+On stdio the server then waits for a client to speak MCP over stdin, which
+from a terminal is indistinguishable from a hang. To see it work:
+
+```bash
+COUCHDB_URL='https://user:password@couchdb.example.net/?db=obsidiandb' npm run try
+```
+
+That starts the server, connects to it as a real MCP client, and calls each
+tool in turn.
 
 Configuration is environment variables throughout. Every sensitive value also
 accepts a `NAME_FILE` form naming a file to read it from, which is how Docker

@@ -84,6 +84,10 @@ export async function startFakeCouch(): Promise<FakeCouch> {
             }
         },
         async stop() {
+            // Drop keep-alive sockets first. A client that has gone away
+            // without closing them leaves `close()` waiting indefinitely,
+            // which presents as a hung teardown rather than a failure.
+            server.closeAllConnections?.();
             await new Promise<void>((resolve) => server.close(() => resolve()));
             for (const db of handles.values()) await db.destroy().catch(() => undefined);
             handles.clear();
