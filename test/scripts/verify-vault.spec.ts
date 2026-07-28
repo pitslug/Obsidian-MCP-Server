@@ -31,8 +31,15 @@ let docs: Map<string, Record<string, unknown>>;
 let server: Server;
 let port: number;
 
+interface VaultShape {
+    /** Additional generated text notes, to exceed one page of the walk. */
+    extraNotes?: number;
+    /** Binary files. They sort last, so a first-N sample would miss them. */
+    binaries?: number;
+}
+
 /** Build a small vault the same way the plugin would. */
-async function buildVault(tweaks: Record<string, unknown>) {
+async function buildVault(tweaks: Record<string, unknown>, shape: VaultShape = {}) {
     const store = new Map<string, Record<string, unknown>>();
 
     store.set(DOCID_MILESTONE, {
@@ -58,12 +65,15 @@ async function buildVault(tweaks: Record<string, unknown>) {
         ["empty.md", ""],
     ];
 
-    for (const [path, text] of notes) {
-        const composed = await composeWrite(
-            path,
-            { kind: "text", text },
-            { settings: SETTINGS, now: 1_700_000_000_000 }
-        );
+    for (let i = 0; i < (shape.extraNotes ?? 0); i++) {
+        notes.push([`generated/note-${String(i).padStart(3, "0")}.md`, `body ${i}\n`.repeat(40 + i)]);
+    }
+
+    const write = async (path: string, content: Parameters<typeof composeWrite>[1]) => {
+        const composed = await composeWrite(path, content, {
+            settings: SETTINGS,
+            now: 1_700_000_000_000,
+        });
         store.set(String(composed.entry._id), {
             ...composed.entry,
             _rev: "1-abc",
@@ -71,6 +81,16 @@ async function buildVault(tweaks: Record<string, unknown>) {
         for (const chunk of composed.chunks) {
             store.set(String(chunk._id), { ...chunk, _rev: "1-def" } as unknown as Record<string, unknown>);
         }
+    };
+
+    for (const [path, text] of notes) {
+        await write(path, { kind: "text", text });
+    }
+
+    for (let i = 0; i < (shape.binaries ?? 0); i++) {
+        const bytes = new Uint8Array(2000 + i * 500);
+        for (let b = 0; b < bytes.length; b++) bytes[b] = (b * (i + 7)) & 0xff;
+        await write(`zattachments/image-${i}.png`, { kind: "binary", bytes });
     }
 
     return store;
@@ -212,18 +232,67 @@ describe("verify-vault against a healthy vault", () => {
         expect(result.out).toMatch(/schema version 12.*matches/s);
     });
 
-    it("assembles every sampled note", () => {
-        expect(result.out).toMatch(/(\d+)\/\1 notes assembled/);
+    it("assembles every sampled file", () => {
+        expect(result.out).toMatch(/(\d+)\/\1 files assembled/);
     });
 
     it("confirms chunk IDs match what the vault already holds", () => {
-        expect(result.out).toMatch(/(\d+)\/\1 notes re-chunk to byte-identical chunk IDs/);
+        expect(result.out).toMatch(/(\d+)\/\1 files re-chunk to byte-identical chunk IDs/);
     });
 
     it("issued only GET requests — nothing that could modify the vault", () => {
         expect(methodsSeen.length).toBeGreaterThan(5);
         expect([...new Set(methodsSeen)]).toEqual(["GET"]);
     });
+});
+
+describe("coverage over a larger vault", () => {
+    let result: { code: number; out: string };
+
+    beforeAll(async () => {
+        // More files than one page of the walk, plus binaries, so pagination
+        // and the text/binary split are both exercised.
+        docs = await buildVault({ encrypt: false, hashAlg: "xxhash64" }, { extraNotes: 60, binaries: 4 });
+        result = await runScript(["--all"]);
+    }, 300_000);
+
+    it("verifies every file rather than a sample", () => {
+        expect(result.out).toContain("Enumerating every file in the vault");
+        expect(result.out).toMatch(/Verifying all \d+/);
+        expect(result.code).toBe(0);
+    });
+
+    it("paginates without dropping or repeating files", () => {
+        // 4 fixed notes + 60 generated + 4 binaries.
+        const match = result.out.match(/(\d+) live file document\(s\)/);
+        expect(Number(match?.[1])).toBe(68);
+    });
+
+    it("reports binary coverage, so attachments cannot be silently skipped", () => {
+        expect(result.out).toMatch(/\d+ text, 4 binary/);
+        expect(result.out).not.toContain("attachments are unverified");
+    });
+
+    it("still matches every chunk ID", () => {
+        expect(result.out).toMatch(/(\d+)\/\1 files re-chunk to byte-identical chunk IDs/);
+    });
+});
+
+describe("sampling", () => {
+    it("warns when a sample contains no binary files", async () => {
+        docs = await buildVault({ encrypt: false }, { extraNotes: 20, binaries: 0 });
+        const result = await runScript(["--sample", "5"]);
+        expect(result.out).toContain("attachments are unverified");
+        expect(result.code).toBe(0);
+    }, 300_000);
+
+    it("spreads the sample rather than taking the alphabetically first N", async () => {
+        docs = await buildVault({ encrypt: false }, { extraNotes: 60, binaries: 2 });
+        // Binaries sort last, under "z". Taking the first N would miss them.
+        const result = await runScript(["--sample", "10"]);
+        expect(result.out).toMatch(/Verifying 10, spread evenly/);
+        expect(result.out).toMatch(/\d+ text, [12] binary/);
+    }, 300_000);
 });
 
 describe("document ID encoding", () => {

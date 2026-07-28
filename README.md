@@ -18,7 +18,7 @@ tested. Nothing talks to a real database yet.
 
 | Unit | State |
 | --- | --- |
-| Vault model | Implemented, 164 tests |
+| Vault model | Implemented, 170 tests |
 | Replicator | Not started |
 | Index | Not started |
 | Write executor | Not started |
@@ -117,9 +117,15 @@ notes, and then does the check that matters: re-chunks each note and compares
 the chunk IDs it *would* write against the ones the plugin actually wrote. If
 those match, the write path deduplicates exactly as another device does.
 
-Useful flags: `--sample N`, `--passphrase` for an encrypted vault, `--verbose`
-for per-note output, and `--capture out.json` to save real documents as
-fixtures — that file contains note content, so do not commit it.
+Useful flags: `--all` to verify every file in the vault rather than a sample,
+`--sample N`, `--passphrase` for an encrypted vault, `--verbose` for per-file
+output, and `--capture out.json` to save real documents as fixtures — that file
+contains note content, so do not commit it.
+
+The sample is spread evenly across the whole ID range rather than taking the
+first N, because IDs sort by path and attachments cluster at one end. It also
+reports the text/binary split and warns when a run contained no binary files at
+all, so a green result cannot quietly mean "attachments untested".
 
 ## Development
 

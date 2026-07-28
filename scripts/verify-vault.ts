@@ -22,7 +22,7 @@
  *   npx tsx scripts/verify-vault.ts \
  *     --url https://user:password@couchdb.example.net \
  *     --db obsidiandb \
- *     [--sample 25] \
+ *     [--sample 25 | --all] \
  *     [--passphrase '...'] \
  *     [--capture fixtures.json]
  *
@@ -71,6 +71,7 @@ interface Options {
     passphrase: string | undefined;
     capture: string | undefined;
     verbose: boolean;
+    all: boolean;
 }
 
 function parseArgs(argv: string[]): Options {
@@ -109,6 +110,7 @@ function parseArgs(argv: string[]): Options {
         passphrase: get("passphrase") ?? process.env.LIVESYNC_PASSPHRASE,
         capture: get("capture"),
         verbose: argv.includes("--verbose"),
+        all: argv.includes("--all"),
     };
 }
 
@@ -202,6 +204,28 @@ class ReadOnlyClient {
             endkey: JSON.stringify(endkey),
             limit: String(limit),
         });
+    }
+
+    /**
+     * Every document in an ID range, a page at a time.
+     *
+     * Paginated by `startkey` rather than `skip`, which CouchDB implements by
+     * walking and discarding — fine for one page, quadratic over a whole vault.
+     */
+    async *walk(startkey: string, endkey: string, pageSize = 500) {
+        let from = startkey;
+        for (;;) {
+            // One extra row tells us whether there is a next page, and where it
+            // starts, without a second request.
+            const page = await this.allDocs(from, endkey, pageSize + 1);
+            const rows = page?.rows ?? [];
+            if (rows.length === 0) return;
+
+            const hasMore = rows.length > pageSize;
+            for (const row of hasMore ? rows.slice(0, pageSize) : rows) yield row;
+            if (!hasMore) return;
+            from = rows[pageSize]?.id as string;
+        }
     }
 
     /** Specific documents by ID. Used to fetch a note's chunks. */
@@ -335,11 +359,14 @@ async function main() {
 
     const ctx = transformContextFor(settings, salt);
 
-    // --- Sample notes ------------------------------------------------------
+    // --- Choose which files to verify --------------------------------------
 
-    console.log(heading(`Reading a sample of up to ${options.sample} notes`));
+    console.log(
+        heading(
+            options.all ? "Enumerating every file in the vault" : `Sampling up to ${options.sample} files`
+        )
+    );
 
-    const candidates: FileEntry[] = [];
     // File documents live outside the `_*` and `h:*` ranges. Mirrors how the
     // plugin enumerates them.
     const ranges: [string, string][] = [
@@ -347,20 +374,44 @@ async function main() {
         ["_\u{10ffff}", PREFIX_CHUNK],
         [CHUNK_ID_RANGE_END, "\u{10ffff}"],
     ];
+
+    const all: FileEntry[] = [];
+    let deleted = 0;
+    let nonFile = 0;
     for (const [start, end] of ranges) {
-        if (candidates.length >= options.sample) break;
-        const page = await client.allDocs(start, end, options.sample * 4);
-        for (const row of page?.rows ?? []) {
-            if (candidates.length >= options.sample) break;
+        for await (const row of client.walk(start, end)) {
             const doc = row.doc as Record<string, unknown> | undefined;
-            if (!doc || !isFileEntry(doc)) continue;
-            if (isDeleted(doc as { deleted?: boolean; _deleted?: boolean })) continue;
-            candidates.push(doc as unknown as FileEntry);
+            if (!doc) continue;
+            if (!isFileEntry(doc)) {
+                nonFile++;
+                continue;
+            }
+            if (isDeleted(doc as { deleted?: boolean; _deleted?: boolean })) {
+                deleted++;
+                continue;
+            }
+            all.push(doc as unknown as FileEntry);
         }
     }
 
-    if (candidates.length === 0) fail("Found no readable file documents in the sampled ranges.");
-    console.log(ok(`Selected ${candidates.length} live file document(s)`));
+    if (all.length === 0) fail("Found no readable file documents outside the chunk and _local ranges.");
+    console.log(ok(`${all.length} live file document(s), ${deleted} deleted, ${nonFile} non-file`));
+
+    // Taking the first N walks the ID order, which is alphabetical by path —
+    // a sample biased towards one corner of the vault, and likely to miss
+    // attachments entirely. Spread the selection across the whole range instead.
+    let candidates = all;
+    if (!options.all && all.length > options.sample) {
+        // Span both ends inclusively. A plain `i * n / sample` never reaches
+        // the last element, and attachments sort last — so the obvious
+        // arithmetic quietly excludes exactly the files most worth checking.
+        const span = (all.length - 1) / Math.max(1, options.sample - 1);
+        const picked = new Set(Array.from({ length: options.sample }, (_, i) => Math.round(i * span)));
+        candidates = [...picked].map((i) => all[i] as FileEntry);
+        console.log(info(`Verifying ${candidates.length}, spread evenly across that set.`));
+    } else {
+        console.log(info(`Verifying all ${candidates.length}.`));
+    }
 
     // --- Verify each -------------------------------------------------------
 
@@ -371,10 +422,20 @@ async function main() {
     });
 
     let assembled = 0;
-    let sizeChecked = 0;
     let chunkIdsMatched = 0;
     let chunkIdsCompared = 0;
     const captured: unknown[] = [];
+
+    /** Coverage, so a green result cannot hide a whole class of file. */
+    const stats = {
+        text: 0,
+        binary: 0,
+        legacy: 0,
+        bytes: 0,
+        chunkRefs: 0,
+        distinctChunks: new Set<string>(),
+        largest: { path: "", size: 0 },
+    };
 
     for (const raw of candidates) {
         let path = "<unknown>";
@@ -392,7 +453,13 @@ async function main() {
 
             const file = assembleFile(entry, chunks);
             assembled++;
-            sizeChecked++;
+
+            stats[file.kind]++;
+            if (isLegacyNote(entry)) stats.legacy++;
+            stats.bytes += file.size;
+            stats.chunkRefs += children.length;
+            for (const id of children) stats.distinctChunks.add(id);
+            if (file.size > stats.largest.size) stats.largest = { path, size: file.size };
 
             if (options.verbose) {
                 console.log(ok(`${path} — ${file.kind}, ${file.size} bytes, ${children.length} chunk(s)`));
@@ -438,16 +505,44 @@ async function main() {
 
     // --- Summary -----------------------------------------------------------
 
+    console.log(heading("Coverage"));
+    console.log(
+        info(
+            `${stats.text} text, ${stats.binary} binary` +
+                (stats.legacy > 0 ? `, ${stats.legacy} legacy (pre-chunking)` : "") +
+                ` — ${(stats.bytes / 1024).toFixed(0)} KiB total`
+        )
+    );
+    console.log(
+        info(
+            `${stats.chunkRefs} chunk reference(s) over ${stats.distinctChunks.size} distinct chunk(s)` +
+                (stats.chunkRefs > 0
+                    ? ` (${(100 - (stats.distinctChunks.size / stats.chunkRefs) * 100).toFixed(0)}% deduplicated)`
+                    : "")
+        )
+    );
+    if (stats.largest.path) {
+        console.log(info(`largest: ${stats.largest.path} at ${(stats.largest.size / 1024).toFixed(1)} KiB`));
+    }
+    if (stats.binary === 0) {
+        console.log(
+            warn(
+                "No binary files in this set — attachments are unverified. " +
+                    "Re-run with --all, or a larger --sample."
+            )
+        );
+    }
+
     console.log(heading("Result"));
     console.log(
         (assembled === candidates.length ? ok : bad)(
-            `${assembled}/${candidates.length} notes assembled and passed their size check`
+            `${assembled}/${candidates.length} files assembled and passed their size check`
         )
     );
     if (chunkIdsCompared > 0) {
         console.log(
             (chunkIdsMatched === chunkIdsCompared ? ok : bad)(
-                `${chunkIdsMatched}/${chunkIdsCompared} notes re-chunk to byte-identical chunk IDs`
+                `${chunkIdsMatched}/${chunkIdsCompared} files re-chunk to byte-identical chunk IDs`
             )
         );
         if (chunkIdsMatched === chunkIdsCompared) {
