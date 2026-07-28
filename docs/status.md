@@ -10,7 +10,7 @@ progress against it and the things you would otherwise have to rediscover.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 391 tests, ~60s
+npm test          # 413 tests, ~70s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -32,6 +32,7 @@ environment, or from Docker secrets in deployment. This repo is public.
 | Handwriting | Transcriptions stored durably, indexed, survive an index rebuild |
 | Tools | Thirteen, none of which can modify the vault |
 | Write executor | Built and tested: single-note writes, deletes, and the plan/commit protocol. No tool reaches it yet |
+| Gate step three | Script written (`npm run verify:write`), never run against a real database |
 | Transport | stdio and streamable HTTP, bearer token |
 | Deployment | Dockerfile and Compose for the Slugworx stack, not yet deployed |
 | OAuth 2.0 + PKCE | Not started, bearer token in the interim |
@@ -73,20 +74,17 @@ revision back out of CouchDB after a transcription is saved.
 2. ~~Verified against the live vault, read-only: every file assembles, and
    re-chunking reproduces the plugin's own chunk IDs~~ done, 25/25 both.
 3. **A verified write, against a throwaway database first.** Outstanding, and
-   now the only thing between here and writing. The executor exists and is
-   tested against an in-process CouchDB; it has never written to a database a
-   real Obsidian instance syncs from. Nothing should write to `obsidiandb`
-   before this passes.
+   now one command plus one look away. `scripts/verify-write.ts` does the
+   machine half; see "Closing the gate" below for the human half. Nothing
+   should write to `obsidiandb` before both are done.
 
 ## What to do next
 
 In rough order:
 
-1. **Acceptance gate step three**, using the executor against a scratch database
-   on the same CouchDB. Not `obsidiandb`. There is no script for this yet; the
-   shape to copy is `scripts/verify-vault.ts`, pointed at a throwaway database,
-   writing through `PlanningWriteExecutor` and reading the result back in
-   Obsidian.
+1. **Run gate step three.** The script exists; running it needs a throwaway
+   database and an Obsidian instance pointed at it, which is why it has not been
+   run. See "Closing the gate".
 2. **The write tools.** The executor has no MCP surface. The design's write
    surface is append, create, targeted edit by string match, set properties on
    one note, batch set properties across a query result, and append to today's
@@ -145,6 +143,41 @@ Smaller things worth doing at some point:
   referencing chunks that exist nowhere. `reusableChunkIds` returns nothing in
   both cases; the cost is re-sending chunks on a write that was happening anyway.
 
+## Closing the gate
+
+Two halves. The script does the first; only you can do the second.
+
+Set up a throwaway database, once:
+
+1. Create a database on the same CouchDB, called something like
+   `obsidian-writetest`. Not `obsidiandb`, and the script refuses that name plus
+   `obsidian`, `vault`, `livesync` and `notes` in case of a typo.
+2. Point **one** Obsidian instance at it, through LiveSync's setup URI, and let
+   it sync. One device, because the script refuses a database more than one has
+   synced to: that is what a vault in real use looks like whatever it is called.
+   Override with `--expect-devices N` only after looking at why.
+
+Then the machine half:
+
+```bash
+npm run verify:write -- --url 'https://USER:PASS@couchdb.slugworx.net' --db obsidian-writetest --keep
+```
+
+It creates a note, edits it reusing chunks, refuses a stale write, plans and
+commits a batch, refuses a stale plan, soft-deletes, writes over the tombstone,
+and reads every result back out of CouchDB through the vault model rather than
+through its own client or the replica. It checks the local replica for conflict
+branches. Everything it makes lives under `mcp-write-check/`, and without
+`--keep` it removes it again on the way out.
+
+`--keep` is what you want the first time, because the human half is looking at
+those notes. The script finishes by printing exactly what should appear in
+Obsidian and where. Open the vault and compare. Delete `mcp-write-check/` from
+Obsidian when you are satisfied.
+
+Only when both halves have passed does anything point at `obsidiandb`, and it
+does so with `READ_ONLY` on for a first period.
+
 ## Running it against the real vault
 
 Read-only, safe against production:
@@ -156,8 +189,10 @@ npm run verify -- --url '...' --census       # where every document went
 npm run verify -- --url '...' --attachments  # which attachments have text
 ```
 
-Nothing above writes. There is deliberately no `npm run` that does, until gate
-step three exists.
+Nothing above writes.
+
+The one command that does is `npm run verify:write`, and it refuses to run
+against `obsidiandb`. See below.
 
 The server, over stdio, with a client attached so it does something visible:
 

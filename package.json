@@ -24,6 +24,7 @@
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
     "verify": "tsx scripts/verify-vault.ts",
+    "verify:write": "tsx scripts/verify-write.ts",
     "try": "tsx scripts/try-tools.ts",
     "attachments": "tsx scripts/verify-vault.ts --attachments"
   },
