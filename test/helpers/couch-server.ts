@@ -6,8 +6,8 @@
  * stands in: it serves the CouchDB HTTP API over an in-memory PouchDB, which is
  * enough for replication, the changes feed and document CRUD.
  *
- * It is not CouchDB. Where behaviour could plausibly differ — validation rules,
- * conflict semantics at scale, `_bulk_docs` edge cases — a test passing here is
+ * It is not CouchDB. Where behaviour could plausibly differ - validation rules,
+ * conflict semantics at scale, `_bulk_docs` edge cases - a test passing here is
  * evidence, not proof, and the same suite should be run against real CouchDB
  * before anything writes to a vault that matters.
  */
@@ -37,8 +37,8 @@ export interface FakeCouch {
 
 export async function startFakeCouch(): Promise<FakeCouch> {
     const app = express();
-    // "minimumForPouchDB" omits Fauxton, the `_users` database and — the one
-    // that matters — the `_replicator` daemon, which registers globally and
+    // "minimumForPouchDB" omits Fauxton, the `_users` database and - the one
+    // that matters - the `_replicator` daemon, which registers globally and
     // throws "already_active" the moment a second instance starts. We only
     // need the document and replication-target endpoints.
     app.use(

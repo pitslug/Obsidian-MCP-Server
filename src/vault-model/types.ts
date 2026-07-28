@@ -2,7 +2,7 @@
  * Document shapes as they exist in CouchDB.
  *
  * These describe the wire format, not the plugin's in-memory types. Notably
- * `datatype` — which appears all over the plugin source — is never persisted;
+ * `datatype` - which appears all over the plugin source - is never persisted;
  * the persisted discriminator is `type`.
  */
 
@@ -151,6 +151,6 @@ export interface ComposedWrite {
     chunks: ChunkEntry[];
     /** The file document, without `_rev`; the caller supplies it. */
     entry: Omit<ChunkedEntry, "_rev">;
-    /** Every chunk ID referenced, in order — including pre-existing ones. */
+    /** Every chunk ID referenced, in order - including pre-existing ones. */
     children: string[];
 }

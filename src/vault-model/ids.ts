@@ -35,7 +35,7 @@ export async function hashString(key: string): Promise<string> {
  *
  * This is upstream's rule verbatim, and it is deliberately not restricted to
  * the known prefixes. A path containing a stray colon therefore produces a
- * "prefix" that is not one of `i:` / `ix:` / `ps:` — which is exactly what the
+ * "prefix" that is not one of `i:` / `ix:` / `ps:` - which is exactly what the
  * plugin does, and why such paths are rejected as sync targets rather than
  * stored. See {@link assertSyncablePath}.
  */
@@ -69,7 +69,7 @@ export class UnsyncablePathError extends Error {
  * Upstream's `isTargetFile` returns false for any path whose body contains `:`,
  * and that gate sits in front of both reading and writing. Without this check
  * we would happily compose a well-formed document at an ID nothing ever looks
- * at — a write that reports success and changes nothing the user can see.
+ * at - a write that reports success and changes nothing the user can see.
  */
 export function assertSyncablePath(path: VaultPath | string): void {
     const source = `${path}`;
@@ -127,7 +127,7 @@ export interface IdOptions {
  * Compute the document ID for a vault path.
  *
  * Without obfuscation the ID is the path verbatim, lowercased if
- * case-insensitive, with a `/` inserted in front if it starts with `_` — CouchDB
+ * case-insensitive, with a `/` inserted in front if it starts with `_` - CouchDB
  * reserves leading-underscore IDs.
  *
  * With obfuscation:
@@ -155,7 +155,7 @@ export async function pathToId(path: VaultPath | string, options: IdOptions): Pr
     if (body.startsWith(PREFIX_OBFUSCATED)) return asDocumentID(newPrefix + escaped);
 
     const hashedPassphrase = await hashString(options.obfuscatePassphrase);
-    // Note: `filename`, not `escaped` — the leading-underscore escape is not
+    // Note: `filename`, not `escaped` - the leading-underscore escape is not
     // part of the hashed input. This asymmetry is upstream.
     const out = await hashString(`${hashedPassphrase}:${filename}`);
     return asDocumentID(prefix + newPrefix + out);
@@ -175,7 +175,7 @@ export class ObfuscatedIdError extends Error {
  * Recover a vault path from a document ID.
  *
  * Throws for obfuscated IDs, which are one-way. When the document is available,
- * use {@link entryPath} instead — it reads the `path` field, which survives
+ * use {@link entryPath} instead - it reads the `path` field, which survives
  * both obfuscation and case folding.
  */
 export function idToPath(id: DocumentID | string): VaultPath {

@@ -6,8 +6,7 @@ via a `$*_PORT` variable, hostname via `$DOMAINNAME`.
 
 ## What it does on start
 
-1. Reads the vault's storage settings from `_local/obsydian_livesync_milestone`
-   — not from configuration, which is only an override.
+1. Reads the vault's storage settings from `_local/obsydian_livesync_milestone` - not from configuration, which is only an override.
 2. Replicates the whole database into `/data/replica`, pull-only.
 3. Waits for that first pass to finish, then serves MCP.
 
@@ -72,8 +71,7 @@ would block MCP clients, which cannot complete an interactive OIDC flow.
 That is weaker than the design intends. The design calls for OAuth 2.0 with
 PKCE implemented in the server, which is what Claude's custom connector flow
 expects, with an IP allowlist or Cloudflare Access in front during initial
-rollout. Until that exists, consider adding one of those as a second layer —
-the token is a single shared credential, and it is the only thing between the
+rollout. Until that exists, consider adding one of those as a second layer - the token is a single shared credential, and it is the only thing between the
 internet and the full text of the vault.
 
 ## Rollback

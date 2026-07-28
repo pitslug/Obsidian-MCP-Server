@@ -2,7 +2,7 @@
  * The verification script, against a fake CouchDB.
  *
  * The script is the thing Chris points at a live vault, so the cost of a bug in
- * it is his time and his confidence — and, if it ever issued a write, his
+ * it is his time and his confidence - and, if it ever issued a write, his
  * notes. These tests stand up an HTTP server that speaks enough CouchDB to
  * exercise every path the script takes, and assert both that it reports
  * correctly and that it never issues a request other than GET.
@@ -240,7 +240,7 @@ describe("verify-vault against a healthy vault", () => {
         expect(result.out).toMatch(/(\d+)\/\1 files re-chunk to byte-identical chunk IDs/);
     });
 
-    it("issued only GET requests — nothing that could modify the vault", () => {
+    it("issued only GET requests - nothing that could modify the vault", () => {
         expect(methodsSeen.length).toBeGreaterThan(5);
         expect([...new Set(methodsSeen)]).toEqual(["GET"]);
     });

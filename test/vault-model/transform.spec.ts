@@ -3,7 +3,7 @@
  *
  * The cryptography itself belongs to `octagonal-wheels` and is not retested
  * here. What is tested is the layering: which documents are transformed, which
- * fields move, and that decode ∘ encode is the identity — including the parts
+ * fields move, and that decode ∘ encode is the identity - including the parts
  * that E2EE v2 deliberately zeroes on the wire.
  */
 
@@ -61,7 +61,7 @@ const obfuscatedEntry = (over: Partial<ChunkedEntry> = {}): ChunkedEntry => ({
 });
 
 describe("what gets transformed", () => {
-    it("never transforms _local documents — that is how the salt stays readable", () => {
+    it("never transforms _local documents - that is how the salt stays readable", () => {
         expect(isUntransformable({ _id: DOCID_MILESTONE })).toBe(true);
         expect(isUntransformable({ _id: "_local/anything" })).toBe(true);
     });

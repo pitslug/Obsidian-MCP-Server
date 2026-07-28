@@ -2,7 +2,7 @@
  * The whole server, started the way the container starts it.
  *
  * Everything below the tool layer already has tests. What this covers is the
- * wiring — that configuration reaches the replicator, that the vault's own
+ * wiring - that configuration reaches the replicator, that the vault's own
  * settings are read before replication decodes anything, that the bearer token
  * is actually enforced, and that the tools answer.
  *
@@ -78,6 +78,7 @@ function configFor(db: string, port: number, overrides: Partial<Config> = {}): C
         couch: { url: couch.url, database: db, username: undefined, password: undefined },
         replicaPath: join(replicaDir, `replica-${db}`),
         indexPath: join(replicaDir, `index-${db}.sqlite`),
+        transcriptPath: join(replicaDir, `transcripts-${db}.sqlite`),
         formatOverrides: {},
         readOnly: true,
         attachmentSizeCap: 25 * 1024 * 1024,

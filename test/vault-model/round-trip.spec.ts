@@ -5,9 +5,9 @@
  * whose failure is unrecoverable: a note that survives a write in a subtly
  * altered form is not something anyone notices until much later.
  *
- * It is asserted end to end — through `composeWrite`, which is what the write
+ * It is asserted end to end - through `composeWrite`, which is what the write
  * executor will actually call, and back through `assembleFile`, which is what
- * every read goes through — rather than over the splitter alone.
+ * every read goes through - rather than over the splitter alone.
  */
 
 import { describe, expect, it } from "vitest";
@@ -28,7 +28,7 @@ async function roundTrip(path: string, content: FileContent, settings = SETTINGS
     const chunks = new Map<string, ChunkEntry>();
     for (const chunk of composed.chunks) chunks.set(chunk._id, chunk);
 
-    // Every referenced chunk must be present — a missing one means composition
+    // Every referenced chunk must be present - a missing one means composition
     // dropped a duplicate it should have kept a reference to.
     for (const child of composed.children) {
         expect(chunks.has(child), `chunk ${child} missing from composed output`).toBe(true);
@@ -190,7 +190,7 @@ describe("composition invariants", () => {
         expect(b.entry._id).not.toBe(a.entry._id);
     });
 
-    it("is deterministic — the same input composes identically", async () => {
+    it("is deterministic - the same input composes identically", async () => {
         const content: FileContent = { kind: "text", text: filler(9_000) };
         const options = { settings: SETTINGS, now: 1_700_000_000_000 };
         const a = await composeWrite("note.md", content, options);

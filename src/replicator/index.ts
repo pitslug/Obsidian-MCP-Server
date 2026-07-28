@@ -11,8 +11,8 @@
  * lives rather than only where it was argued:
  *
  *   Replication reconciles everything that differs between two databases; it
- *   cannot be scoped to intent. A local replica that drifts for any reason — a
- *   half-completed write, a decode bug, a restored snapshot — would have that
+ *   cannot be scoped to intent. A local replica that drifts for any reason - a
+ *   half-completed write, a decode bug, a restored snapshot - would have that
  *   drift pushed faithfully to the vault and thence to every device. With
  *   pull-only replication plus direct writes, the only documents that can ever
  *   reach the vault are ones the write executor constructed deliberately.
@@ -112,8 +112,7 @@ export class Replicator extends EventEmitter {
                     return await decodeDocument(doc as never, this.options.transform);
                 } catch (error) {
                     // Throwing here aborts replication for the whole batch. One
-                    // undecodable document should not stop the vault syncing —
-                    // it is recorded, counted, and the document passes through
+                    // undecodable document should not stop the vault syncing - // it is recorded, counted, and the document passes through
                     // in its wire form, where assembly will refuse it loudly.
                     this.decodeFailures++;
                     const id = String((doc as { _id?: unknown })?._id ?? "<unknown>");
@@ -190,7 +189,7 @@ export class Replicator extends EventEmitter {
      *
      * `lagMs` measures time since the last change arrived, which on a quiet
      * vault grows without anything being wrong. It answers "how stale could
-     * this be", not "how far behind is it" — the latter is not knowable
+     * this be", not "how far behind is it" - the latter is not knowable
      * without asking the remote, which is what a read's `fresh` flag is for.
      */
     status(): ReplicationStatus {
@@ -221,7 +220,7 @@ export class Replicator extends EventEmitter {
      * Wait until the first full replication pass has finished.
      *
      * Resolves as soon as replication reports itself caught up. Rejects on a
-     * fatal replication error, and on timeout — a caller that waited forever
+     * fatal replication error, and on timeout - a caller that waited forever
      * would present as a hung startup with no explanation.
      */
     async waitForInitialSync(timeoutMs = 300_000): Promise<void> {

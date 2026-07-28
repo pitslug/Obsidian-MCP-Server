@@ -3,7 +3,7 @@
  * Read-only verification of the vault model against a real LiveSync database.
  *
  * This is step two of the acceptance gate in `docs/design.md`: prove that a
- * sample of real notes reconstructs correctly, and — more valuable — that the
+ * sample of real notes reconstructs correctly, and - more valuable - that the
  * chunk IDs this code *would* write are byte-identical to the ones the plugin
  * actually wrote. The second check is the one that matters, because it
  * validates the write path against the exact plugin version and settings in
@@ -126,15 +126,15 @@ function fail(message: string): never {
 }
 
 // ---------------------------------------------------------------------------
-// Transport — GET only, by construction
+// Transport - GET only, by construction
 // ---------------------------------------------------------------------------
 
 /**
  * Percent-encode a document ID for use in a URL path.
  *
  * The `_local/` and `_design/` prefixes are literal path segments in CouchDB's
- * URL scheme, so their slash must survive. Every other slash — and a vault path
- * is full of them, since the path *is* the document ID — must be encoded, or
+ * URL scheme, so their slash must survive. Every other slash - and a vault path
+ * is full of them, since the path *is* the document ID - must be encoded, or
  * CouchDB reads it as a further path segment.
  *
  * Encoding the whole ID uniformly yields `_local%2Fobsydian_livesync_milestone`,
@@ -240,7 +240,7 @@ class ReadOnlyClient {
      * Every document in an ID range, a page at a time.
      *
      * Paginated by `startkey` rather than `skip`, which CouchDB implements by
-     * walking and discarding — fine for one page, quadratic over a whole vault.
+     * walking and discarding - fine for one page, quadratic over a whole vault.
      */
     async *walk(startkey: string, endkey: string, pageSize = 500) {
         let from = startkey;
@@ -402,8 +402,7 @@ function inFileRanges(id: string): boolean {
  * Account for every document in the database.
  *
  * Written because a full verification run reported 25 live files in a database
- * of 1,403 documents, which is either the truth or a hole in the enumeration —
- * and "probably orphaned chunks" is not something to build a replicator on top
+ * of 1,403 documents, which is either the truth or a hole in the enumeration - * and "probably orphaned chunks" is not something to build a replicator on top
  * of. This walks the whole ID space and says where every document went.
  *
  * Chunk bodies are never fetched; a chunk is identified by its ID prefix, and
@@ -661,13 +660,12 @@ async function main() {
     if (all.length === 0) fail("Found no readable file documents outside the chunk and _local ranges.");
     console.log(ok(`${all.length} live file document(s), ${deleted} deleted, ${nonFile} non-file`));
 
-    // Taking the first N walks the ID order, which is alphabetical by path —
-    // a sample biased towards one corner of the vault, and likely to miss
+    // Taking the first N walks the ID order, which is alphabetical by path - // a sample biased towards one corner of the vault, and likely to miss
     // attachments entirely. Spread the selection across the whole range instead.
     let candidates = all;
     if (!options.all && all.length > options.sample) {
         // Span both ends inclusively. A plain `i * n / sample` never reaches
-        // the last element, and attachments sort last — so the obvious
+        // the last element, and attachments sort last - so the obvious
         // arithmetic quietly excludes exactly the files most worth checking.
         const span = (all.length - 1) / Math.max(1, options.sample - 1);
         const picked = new Set(Array.from({ length: options.sample }, (_, i) => Math.round(i * span)));
@@ -838,7 +836,7 @@ async function main() {
 
 /**
  * Only run when invoked directly. The tests import `encodeDocumentId` from
- * here, and without this guard that import would execute a full run — and call
+ * here, and without this guard that import would execute a full run - and call
  * `process.exit` inside the test worker.
  */
 function isEntrypoint(): boolean {

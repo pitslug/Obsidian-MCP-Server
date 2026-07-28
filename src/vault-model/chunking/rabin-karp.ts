@@ -36,7 +36,7 @@ export interface RabinKarpInput {
     bytes: Uint8Array;
     /**
      * Whether the source blob was `text/plain`. True whenever the content came
-     * from a JavaScript string, regardless of file extension — which is why in
+     * from a JavaScript string, regardless of file extension - which is why in
      * practice almost everything the plugin writes takes the text path.
      */
     isTextBlob: boolean;

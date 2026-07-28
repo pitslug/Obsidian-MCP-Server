@@ -144,7 +144,7 @@ describe("the shape on the wire", () => {
         }
         expect(mine.children).toEqual(theirsWire.children);
         expect(mine.type).toBe(theirsWire.type);
-        // The ciphertext differs — fresh salt and IV per message — but the
+        // The ciphertext differs - fresh salt and IV per message - but the
         // marker prefix must not.
         expect(String(mine.path).slice(0, 5)).toBe(String(theirsWire.path).slice(0, 5));
     });

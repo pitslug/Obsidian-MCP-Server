@@ -3,7 +3,7 @@
  * Entry point.
  *
  * Configuration failures exit non-zero with the reason on stderr rather than a
- * stack trace — in a container, that message is all the operator gets.
+ * stack trace - in a container, that message is all the operator gets.
  */
 
 import { start } from "./server/index.js";

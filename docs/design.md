@@ -1,4 +1,4 @@
-# obsidian-livesync-mcp — design
+# obsidian-livesync-mcp - design
 
 **Date:** 2026-07-25
 **Status:** design approved, not yet implemented
@@ -21,8 +21,8 @@ Two off-the-shelf routes were evaluated and rejected.
 Chaining `livesync-bridge` to a filesystem-based MCP server works, but needs two
 containers with two runtimes, materialises a permanently decrypted copy of the
 vault on disk, and inherits `obsidian-web-mcp`'s lack of any link-graph
-awareness. Adopting `obsidian-sync-mcp` wholesale is closer to right — it also
-talks to CouchDB directly — but its nine tools do not cover the curation and
+awareness. Adopting `obsidian-sync-mcp` wholesale is closer to right - it also
+talks to CouchDB directly - but its nine tools do not cover the curation and
 frontmatter work this vault is being built for, and it makes every read a live
 HTTP round trip per chunk.
 
@@ -32,14 +32,13 @@ That is the real cost, and it is concentrated in one testable unit.
 ## Constraints and decisions already settled
 
 The runtime is Node 22 and TypeScript, not by preference but by necessity: the
-primitives that make LiveSync's format legible — `transform-pouch` for the E2EE
-boundary, `octagonal-wheels`, `xxhash-wasm` for chunk identity, the PouchDB core
-— exist only in JavaScript. Reimplementing them in another language would mean
+primitives that make LiveSync's format legible - `transform-pouch` for the E2EE
+boundary, `octagonal-wheels`, `xxhash-wasm` for chunk identity, the PouchDB core - exist only in JavaScript. Reimplementing them in another language would mean
 reimplementing the one part of this system where being wrong destroys the vault.
 
 Deployment is Docker Compose behind Traefik, matching existing infrastructure.
 
-The vault is currently small — under a thousand notes — and expected to grow into
+The vault is currently small - under a thousand notes - and expected to grow into
 the low thousands with significant attachment volume. Everything here is sized
 for the target, not the present.
 
@@ -56,8 +55,7 @@ Writes do not travel through the replication channel. When a tool writes, the
 write executor composes the documents and `PUT`s them straight to CouchDB over
 HTTP, then observes them arrive back down the pull stream as confirmation.
 
-The alternative — a genuine two-way peer, which is what every Obsidian device is
-— was considered and rejected on blast radius. Replication reconciles everything
+The alternative - a genuine two-way peer, which is what every Obsidian device is - was considered and rejected on blast radius. Replication reconciles everything
 that differs between two databases; it cannot be scoped to intent. A local
 replica that drifts for any reason, whether a half-completed write, a decode bug
 or a restored snapshot, has its drift pushed faithfully to the vault and thence
@@ -73,7 +71,7 @@ new revision rather than waiting for the pull loop to come around.
 ### Consistency model
 
 Reads are served from the local replica, and search additionally goes through the
-index built from it, so both are eventually consistent — typically sub-second
+index built from it, so both are eventually consistent - typically sub-second
 behind CouchDB, with search trailing note reads by the time it takes to reindex a
 changed note. This is acceptable for retrieval and synthesis, and every response
 carries the current replication and index lag so staleness is visible rather than
@@ -88,8 +86,7 @@ composing a write, so a lagging replica can never cause a lost update.
 ### Write safety
 
 Any operation that touches more than one note is a two-phase dry run. The first
-call returns a plan — every affected path, before and after values, and totals —
-and writes nothing. A second call commits that plan by ID.
+call returns a plan - every affected path, before and after values, and totals - and writes nothing. A second call commits that plan by ID.
 
 Plans are single-use, expire after fifteen minutes, and record the `_rev` of
 every target note at planning time. Commit refuses outright if any target has
@@ -102,7 +99,7 @@ blast radius of one note is one note.
 
 ### Attachments
 
-Attachment metadata — path, size, MIME type, and which notes reference it — is
+Attachment metadata - path, size, MIME type, and which notes reference it - is
 indexed. Attachment bytes are never indexed and never enter the search path.
 
 A specific attachment can be retrieved on request, subject to a configured size
@@ -134,7 +131,7 @@ assembly and splitting, chunk identity, path deobfuscation, note document shape.
 
 Built as pure functions with no network access and no database handle. Documents
 in, note out. Note in, documents out. This constraint is deliberate and load
-bearing — it is what allows the riskiest code in the system to be tested
+bearing - it is what allows the riskiest code in the system to be tested
 exhaustively against captured fixtures with no CouchDB present.
 
 ### Index
@@ -145,7 +142,7 @@ frontmatter properties, tags, links, and attachment metadata. Knows nothing abou
 CouchDB or chunks; it consumes assembled notes.
 
 Because the index parses notes rather than reading files, the wikilink graph and
-backlinks are available — the capability that ruled out the off-the-shelf
+backlinks are available - the capability that ruled out the off-the-shelf
 filesystem server.
 
 ### Write executor
@@ -215,7 +212,7 @@ destroy.
 Configuration is environment variables throughout, with no config file, so
 nothing holding a secret ever needs to sit on disk as a mounted file. The
 sensitive values are the CouchDB URL, database name, username and password, and
-the LiveSync E2EE passphrase — with the path obfuscation passphrase alongside it
+the LiveSync E2EE passphrase - with the path obfuscation passphrase alongside it
 if that is enabled. The rest is operational: public hostname, OAuth client ID and
 secret, read-only toggle, attachment size cap, and plan ceiling.
 
@@ -251,8 +248,8 @@ The vault model is tested first and hardest, because it is the unit whose
 failure is unrecoverable. Round-trip property tests assert that splitting a note
 into chunks and reassembling it is the identity function, across empty files,
 very large files, unicode, mixed line endings, and content at and around chunk
-boundaries. Golden fixtures — real document sets captured from a throwaway vault
-synced by the actual plugin — assert that the model reads what LiveSync writes.
+boundaries. Golden fixtures - real document sets captured from a throwaway vault
+synced by the actual plugin - assert that the model reads what LiveSync writes.
 
 Integration tests run against an ephemeral CouchDB in Compose, seeded from those
 fixtures, covering the changes feed, index maintenance, and the plan-and-commit
@@ -271,7 +268,7 @@ These are believed true and cheap to confirm, but the design leans on them.
 
 Chunk identifiers are pure content hashes with no per-document or per-revision
 salt. Assembly does not depend on this, since a complete replica holds every
-chunk document regardless — but the write path does, because composing a write
+chunk document regardless - but the write path does, because composing a write
 means computing identifiers for new chunks and reusing existing ones. If
 identifiers turn out to be salted, the write path needs the salt derivation and
 loses chunk reuse across notes; reads are unaffected.
@@ -288,7 +285,7 @@ fail loudly rather than silently misread.
 
 ## Out of scope
 
-OneNote migration — content has already been moved. Long-form drafting tools.
+OneNote migration - content has already been moved. Long-form drafting tools.
 Canvas support. Multi-vault support. Rename and move with automatic link
 rewriting, which is genuinely useful but is a large feature with vault-wide blast
 radius and should be its own design once the foundation is trusted.

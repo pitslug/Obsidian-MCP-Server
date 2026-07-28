@@ -2,14 +2,14 @@
  * Chunk identity.
  *
  * A chunk's document ID is a pure content hash. There is no per-document,
- * per-revision, per-path or per-position salt — only, when E2EE is on, a
+ * per-revision, per-path or per-position salt - only, when E2EE is on, a
  * single vault-wide value derived from the passphrase. Identical chunk text
  * anywhere in the vault yields an identical ID, which is the whole
  * deduplication mechanism.
  *
  * This confirms the first assumption in the design document. The write path can
  * therefore reuse existing chunks across notes, and can treat a 409 on a chunk
- * PUT as success — the document already there has, by construction, the same
+ * PUT as success - the document already there has, by construction, the same
  * content.
  *
  * The caveat is that nothing upstream verifies this. A 409 is unconditionally
@@ -49,8 +49,7 @@ export async function initHashing(): Promise<XXHashAPI> {
 /**
  * The two passphrase-derived values used to salt chunk hashes.
  *
- * Only the first three quarters of the passphrase characters are used —
- * `~~((length / 4) * 3)`. That is upstream behaviour, not a typo here.
+ * Only the first three quarters of the passphrase characters are used - * `~~((length / 4) * 3)`. That is upstream behaviour, not a typo here.
  */
 export function derivePassphraseSalts(passphrase: string): {
     hashedPassphrase: string;
@@ -151,7 +150,7 @@ export class ChunkHasher {
     }
 }
 
-/** WebCrypto SHA-1, base64-encoded — so these IDs contain `+`, `/` and `=`. */
+/** WebCrypto SHA-1, base64-encoded - so these IDs contain `+`, `/` and `=`. */
 async function sha1Base64(input: string): Promise<string> {
     const digest = await crypto.subtle.digest("SHA-1", writeString(input));
     return Buffer.from(digest).toString("base64");

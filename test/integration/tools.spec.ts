@@ -4,8 +4,8 @@
  * The other integration tests stop below the protocol: they prove the reader
  * assembles notes and that the transport enforces a token, but nothing until
  * now had actually called a tool. A tool can be broken in ways none of those
- * catch — a schema that rejects valid arguments, a result shape the client
- * cannot parse, a handler that throws where it should explain — and all of
+ * catch - a schema that rejects valid arguments, a result shape the client
+ * cannot parse, a handler that throws where it should explain - and all of
  * them present to the user as the assistant simply not being able to read
  * their notes.
  *
@@ -24,6 +24,7 @@ import { composeWrite } from "../../src/vault-model/compose.js";
 import { resolveSettings } from "../../src/vault-model/settings.js";
 import { DOCID_MILESTONE, DOCID_VERSIONING, SUPPORTED_DB_VERSION } from "../../src/vault-model/constants.js";
 import { startFakeCouch, type FakeCouch } from "../helpers/couch-server.js";
+import { pdfWithText, pdfWithoutText } from "../helpers/pdf.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entrypoint = resolve(here, "../../src/index.ts");
@@ -31,10 +32,22 @@ const SETTINGS = resolveSettings({ customChunkSize: 60 });
 
 const NOTE = "# Today\n\n- [ ] a task\n\nSome body text.\n";
 const BIG = "project body\n".repeat(400);
+/** A page of ink from a handwriting plugin: a real PDF with no text in it. */
+const INK = "Ink/2026-07-20 board.pdf";
 
 let couch: FakeCouch;
 let replicaDir: string;
 let client: Client;
+
+/**
+ * CouchDB id and revision of the handwritten PDF's entry, as seeded.
+ *
+ * Kept so that "the vault was not written to" can be asserted against the
+ * server's own storage rather than against a reassuring sentence in a tool's
+ * output.
+ */
+let inkDocId: string;
+let inkDocRev: string | undefined;
 
 /** Text of a tool result, joined. */
 function textOf(result: unknown): string {
@@ -77,6 +90,19 @@ beforeAll(async () => {
         ["daily/2026-07-28.md", { kind: "text", text: NOTE }],
         ["projects/big.md", { kind: "text", text: BIG }],
         ["attachments/image.png", { kind: "binary", bytes: new Uint8Array(3000).fill(7) }],
+        [INK, { kind: "binary", bytes: pdfWithoutText() }],
+        // A PDF that does carry a text layer, so the tools can be shown to tell
+        // the two apart rather than treating every PDF as needing a human.
+        [
+            "attachments/typed.pdf",
+            {
+                kind: "binary",
+                bytes: pdfWithText([
+                    "Quarterly summary for the Brisbane depot, prepared in advance.",
+                    "Throughput rose; the forklift contract is up for renewal in March.",
+                ]),
+            },
+        ],
         [
             "projects/house.md",
             {
@@ -99,6 +125,10 @@ beforeAll(async () => {
             ...(composed.chunks as unknown as Record<string, unknown>[]),
             composed.entry as unknown as Record<string, unknown>,
         ]);
+        if (path === INK) {
+            inkDocId = String((composed.entry as unknown as { _id: string })._id);
+            inkDocRev = (await couch.get("vault", inkDocId))?._rev as string | undefined;
+        }
     }
 
     const transport = new StdioClientTransport({
@@ -113,6 +143,13 @@ beforeAll(async () => {
             COUCHDB_DATABASE: "vault",
             MCP_TRANSPORT: "stdio",
             REPLICA_PATH: join(replicaDir, "replica"),
+            // Pinned into the temp directory, not left to their defaults. An
+            // unpinned INDEX_PATH once had a run silently reuse a previous
+            // run's index, which hid a bug for as long as it took to notice;
+            // more immediately, defaults would have these tests writing to the
+            // container path a deployment uses.
+            INDEX_PATH: join(replicaDir, "index.sqlite"),
+            TRANSCRIPT_PATH: join(replicaDir, "transcripts.sqlite"),
             LOG_LEVEL: "error",
         },
         stderr: "pipe",
@@ -129,7 +166,7 @@ afterAll(async () => {
 });
 
 describe("the tool surface", () => {
-    it("advertises exactly the read tools, and no write tools", async () => {
+    it("advertises exactly the read tools, and no tool that writes to the vault", async () => {
         const { tools } = await client.listTools();
         const names = tools.map((t) => t.name).sort();
         expect(names).toEqual([
@@ -137,15 +174,34 @@ describe("the tool surface", () => {
             "find_by_tag",
             "get_attachment",
             "list_notes",
+            "list_untranscribed",
             "note_links",
             "property_inventory",
             "read_note",
+            "save_transcription",
             "search_notes",
             "tag_inventory",
             "vault_health",
             "vault_status",
         ]);
         expect(names.some((name) => /write|create|append|delete|update|set_/.test(name))).toBe(false);
+    });
+
+    it("registers save_transcription even though this server is read-only", async () => {
+        // The one apparent exception to "read-only means no writes". The
+        // read-only setting protects the *vault*, and a transcription goes to a
+        // local database this server owns; nothing in that path can produce a
+        // CouchDB document.
+        //
+        // That claim is proved by "leaves the vault itself untouched" further
+        // down, which reads the attachment's revision back out of CouchDB after
+        // a transcription is saved. Asserting it here against the tool's own
+        // description would only be testing that the prose is reassuring.
+        const status = textOf(await client.callTool({ name: "vault_status", arguments: {} }));
+        expect(status).toMatch(/Writes: disabled \(read-only\)/);
+
+        const { tools } = await client.listTools();
+        expect(tools.some((tool) => tool.name === "save_transcription")).toBe(true);
     });
 
     it("describes each tool well enough to be chosen correctly", async () => {
@@ -338,5 +394,155 @@ describe("get_attachment", () => {
             await client.callTool({ name: "get_attachment", arguments: { path: "nope.pdf" } })
         );
         expect(text).toMatch(/No note at "nope.pdf"/);
+    });
+});
+
+/**
+ * Transcription, end to end.
+ *
+ * The vault this serves is full of handwritten PDFs exported by an Obsidian ink
+ * plugin. Those files have no text layer at all, so extraction finds nothing and
+ * they are invisible to search - which is the whole problem. The path being
+ * tested is: find what cannot be searched, hand it to something that can read
+ * ink, store what comes back, and have it searchable immediately.
+ *
+ * These run in order and share the one server, deliberately: the point is the
+ * sequence, not the individual calls.
+ */
+describe("transcription", () => {
+    const TRANSCRIPT =
+        "Board meeting, 20 July. Deferred the Adelaide lease. " +
+        "Kingfisher trial extended by a fortnight. Ask Priya about the depot roster.";
+
+    it("hands over the PDF itself when there is no text layer to extract", async () => {
+        // The step the whole feature turns on. Answering "this has no text
+        // layer" in prose would leave a model told to read the file with no
+        // way to read it, and list_untranscribed pointing at a dead end.
+        const result = (await client.callTool({
+            name: "get_attachment",
+            arguments: { path: INK },
+        })) as {
+            content: {
+                type: string;
+                text?: string;
+                resource?: { uri: string; mimeType?: string; blob?: string };
+            }[];
+        };
+
+        const explanation = result.content.find((part) => part.type === "text");
+        expect(explanation?.text).toMatch(/no text layer/i);
+        expect(explanation?.text).toMatch(/save_transcription/);
+        expect(explanation?.text).toMatch(/does not modify the vault/i);
+
+        const resource = result.content.find((part) => part.type === "resource");
+        expect(resource?.resource?.mimeType).toBe("application/pdf");
+        expect(resource?.resource?.uri).toContain(INK);
+        // The bytes must be the actual PDF, not a placeholder.
+        const decoded = Buffer.from(resource?.resource?.blob ?? "", "base64");
+        expect(decoded.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    });
+
+    it("returns a PDF that does have a text layer as text, not as bytes", async () => {
+        const result = (await client.callTool({
+            name: "get_attachment",
+            arguments: { path: "attachments/typed.pdf" },
+        })) as { content: { type: string; text?: string }[] };
+
+        expect(result.content.every((part) => part.type === "text")).toBe(true);
+        expect(textOf(result)).toContain("forklift contract");
+    });
+
+    it("lists everything with no searchable text, not only the PDFs", async () => {
+        const text = textOf(await client.callTool({ name: "list_untranscribed", arguments: {} }));
+
+        expect(text).toContain(INK);
+        expect(text).toContain("no text layer");
+        // The image belongs here too. Listing only the states someone thought
+        // of is how an image, a file over the extraction cap, or one that
+        // failed to parse gets reported as fine while matching nothing: all
+        // three have no text, and all three can be read by a model.
+        expect(text).toContain("attachments/image.png");
+
+        // A PDF with a real text layer is already searchable; asking a model to
+        // read it would be paying twice for what extraction did for free.
+        expect(text).not.toContain("attachments/typed.pdf");
+        expect(text).toMatch(/2 of 3 attachment\(s\) have no searchable text/);
+        expect(text).toMatch(/save_transcription/);
+    });
+
+    it("refuses a transcription of a file that is not there", async () => {
+        const text = textOf(
+            await client.callTool({
+                name: "save_transcription",
+                arguments: { path: "Ink/imaginary.pdf", text: "..." },
+            })
+        );
+        expect(text).toMatch(/No note at "Ink\/imaginary\.pdf"/);
+        expect(text).toMatch(/must belong to a file that exists/);
+    });
+
+    it("refuses a transcription of a text note", async () => {
+        // Accepting one would put a second, divergent copy of the note's text
+        // into the search index, and the note is already searchable.
+        const text = textOf(
+            await client.callTool({
+                name: "save_transcription",
+                arguments: { path: "daily/2026-07-28.md", text: "..." },
+            })
+        );
+        expect(text).toMatch(/text note/);
+        expect(text).toMatch(/already searchable/);
+    });
+
+    it("stores a transcription and says the vault was not touched", async () => {
+        const text = textOf(
+            await client.callTool({
+                name: "save_transcription",
+                arguments: { path: INK, text: TRANSCRIPT, provenance: "claude-opus-5" },
+            })
+        );
+        expect(text).toContain(INK);
+        // The reassurance matters: a user told this server is read-only needs to
+        // know a tool that writes something has not written to their vault.
+        expect(text).toMatch(/vault file itself was not modified/i);
+    });
+
+    it("makes the handwriting searchable straight away, without a restart", async () => {
+        const text = textOf(await client.callTool({ name: "search_notes", arguments: { query: "Kingfisher" } }));
+        expect(text).toContain(INK);
+        expect(text).toMatch(/«Kingfisher»/i);
+    });
+
+    it("stops listing it as needing transcription", async () => {
+        const text = textOf(await client.callTool({ name: "list_untranscribed", arguments: {} }));
+        expect(text).not.toContain(INK);
+        // Asserted positively as well. A bare "does not contain" passes on an
+        // error string, on an empty result, and on a false all-clear, none of
+        // which is the behaviour being claimed.
+        expect(text).toContain("attachments/image.png");
+        expect(text).toMatch(/1 of 3 attachment\(s\) have no searchable text/);
+    });
+
+    it("serves the transcription afterwards, instead of the apology", async () => {
+        // Once someone has paid to have the ink read, returning "no text could
+        // be read" would be untrue and would invite the work being redone.
+        const text = textOf(await client.callTool({ name: "get_attachment", arguments: { path: INK } }));
+        expect(text).toContain("Kingfisher");
+        expect(text).toMatch(/Source: transcription \(claude-opus-5\)/);
+        expect(text).not.toMatch(/no text layer/i);
+    });
+
+    it("leaves the vault itself untouched", async () => {
+        // Asserted against CouchDB, not against the tool's own reassurance.
+        // A tool that says "the vault was not modified" while modifying it is
+        // exactly the failure this project cannot afford, and the only witness
+        // that settles it is the stored document's revision.
+        const doc = await couch.get("vault", inkDocId);
+        expect(doc).toBeTruthy();
+        expect(doc?._rev).toBe(inkDocRev);
+        expect(JSON.stringify(doc)).not.toContain("Kingfisher");
+
+        const status = textOf(await client.callTool({ name: "vault_status", arguments: {} }));
+        expect(status).toMatch(/Writes: disabled \(read-only\)/);
     });
 });

@@ -52,9 +52,37 @@ export interface LinkRow {
     embed: boolean;
 }
 
+/**
+ * What became of an attachment's text, as recorded in `notes.extraction`.
+ *
+ * A union rather than `string`, because these values are compared by literal in
+ * several places and a typo in any of them would compile cleanly and then
+ * silently drop a file out of the transcription queue, or out of search.
+ */
+export type ExtractionState =
+    /** A text layer was read from the file. */
+    | "extracted"
+    /** A model read the file, and its reading is stored. */
+    | "transcribed"
+    /** A transcription exists, but the file has changed since it was made. */
+    | "transcribed-stale"
+    /** A PDF whose pages carry no text layer: ink, or a scan without OCR. */
+    | "no-text-layer"
+    /** A file type with no text to extract, such as an image. */
+    | "not-textual"
+    /** Too large to attempt. */
+    | "skipped"
+    /** The file could not be parsed. */
+    | "failed";
+
+/** Whether an attachment in this state has text that a search could match. */
+export function isSearchable(state: ExtractionState | undefined): boolean {
+    return state === "extracted" || state === "transcribed";
+}
+
 /** Text pulled out of an attachment, for indexing alongside notes. */
 export interface AttachmentText {
-    outcome: string;
+    outcome: ExtractionState;
     text: string;
     reason: string | undefined;
 }
@@ -486,7 +514,7 @@ export class VaultIndex {
     }
 
     /** Attachments and what came of trying to extract their text. */
-    extractionReport(): { path: string; outcome: string; reason: string | undefined }[] {
+    extractionReport(): { path: string; outcome: ExtractionState | undefined; reason: string | undefined }[] {
         const rows = this.db
             .prepare(
                 `SELECT path, extraction AS outcome, extraction_reason AS reason
@@ -495,7 +523,10 @@ export class VaultIndex {
             .all() as unknown as { path: string; outcome: string | null; reason: string | null }[];
         return rows.map((row) => ({
             path: row.path,
-            outcome: row.outcome ?? "not attempted",
+            // Undefined rather than a stand-in string, so a caller has to decide
+            // what "never attempted" means to it instead of pattern-matching a
+            // sentence. It is not the same as any of the known outcomes.
+            outcome: (row.outcome as ExtractionState | null) ?? undefined,
             reason: row.reason ?? undefined,
         }));
     }

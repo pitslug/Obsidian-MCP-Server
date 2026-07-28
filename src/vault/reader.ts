@@ -2,14 +2,13 @@
  * Reading the vault.
  *
  * Sits between the replicator and the tool layer: takes a path, returns a note.
- * Reads are served from the local replica, so they are eventually consistent —
- * typically sub-second behind CouchDB. Every response carries the replication
+ * Reads are served from the local replica, so they are eventually consistent - * typically sub-second behind CouchDB. Every response carries the replication
  * lag, so staleness is visible rather than assumed away.
  *
  * Two escape hatches keep that safe. A read may ask to verify the note's
  * revision against CouchDB before answering, for cases where currency matters
  * more than latency. And when the replica is missing a chunk, the chunk is
- * fetched directly rather than the read failing — a note is unreadable only if
+ * fetched directly rather than the read failing - a note is unreadable only if
  * the chunk is missing from CouchDB too.
  */
 
@@ -116,7 +115,7 @@ export class VaultReader {
                 if (!entry) throw new NoteNotFoundError(path);
                 throw new StaleReadError(path);
             }
-            // Prefer the remote copy outright — it is by definition current,
+            // Prefer the remote copy outright - it is by definition current,
             // and comparing revisions only to then re-fetch would be a wasted
             // round trip.
             entry = remote as unknown as FileEntry;
@@ -135,7 +134,7 @@ export class VaultReader {
      * A missing chunk usually means replication has not caught up with a note
      * that changed moments ago. Fetching it directly turns a transient failure
      * into a slightly slower read. If CouchDB does not have it either, the read
-     * fails — a partially assembled note is never returned.
+     * fails - a partially assembled note is never returned.
      */
     private async assemble(entry: FileEntry): Promise<AssembledFile> {
         const children = isLegacyNote(entry) ? [] : (entry as ChunkedEntry).children;

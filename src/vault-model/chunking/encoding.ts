@@ -4,7 +4,7 @@
  * Text chunks are UTF-8 decoded strings stored directly in JSON. Binary chunks
  * are standard (padded, `+`/`/`) base64.
  *
- * `decodeChunkText` must not strip a leading byte order mark — a BOM at the
+ * `decodeChunkText` must not strip a leading byte order mark - a BOM at the
  * start of a file is content, and dropping it would make round-tripping lossy
  * for exactly the files most likely to notice. Upstream constructs its decoder
  * with `ignoreBOM: true` for this reason; so do we.

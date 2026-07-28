@@ -5,7 +5,7 @@
  * rest of the index can just import `DatabaseSync` and forget about them.
  *
  * First, `node:sqlite` is loaded through `createRequire` rather than a static
- * import. Vite — which Vitest builds on — carries a hard-coded list of Node
+ * import. Vite - which Vitest builds on - carries a hard-coded list of Node
  * builtins that predates this module, so a static `import ... from
  * "node:sqlite"` gets its prefix stripped and then fails to resolve as a
  * package. A runtime require is opaque to that analysis. The type-only import

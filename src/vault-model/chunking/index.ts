@@ -5,7 +5,7 @@
  *
  * Chunk boundaries are not part of the correctness contract for a *reader*: a
  * file is reassembled by concatenating its `children` in order, whatever
- * produced them. They are not strictly part of it for a *writer* either — the
+ * produced them. They are not strictly part of it for a *writer* either - the
  * plugin will read back a document chunked by any algorithm. What differs is
  * deduplication: chunks the plugin would have produced are reused only if we
  * produce identical ones.
@@ -77,7 +77,7 @@ export function absoluteMaxPieceSize(customChunkSize: number): number {
  * Split a file's content into chunk payloads.
  *
  * Text content is passed through as a `text/plain` blob would be, which is what
- * the plugin does for anything loaded as a string — so the text path is taken
+ * the plugin does for anything loaded as a string - so the text path is taken
  * regardless of extension.
  */
 export function splitContent(

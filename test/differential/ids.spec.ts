@@ -2,7 +2,7 @@
  * Our path↔ID mapping against the plugin's.
  *
  * Getting this wrong does not throw. It writes a document at an ID nobody
- * reads, leaving the original untouched and a duplicate behind — so it is worth
+ * reads, leaving the original untouched and a duplicate behind - so it is worth
  * testing harder than the failure mode suggests.
  */
 

@@ -3,7 +3,7 @@
  *
  * `@vrtmrz/livesync-commonlib` is a development dependency only. It is imported
  * by explicit file path because its package exports map does not expose these
- * modules, and it must never be imported from `src/` — the whole point of the
+ * modules, and it must never be imported from `src/` - the whole point of the
  * vault model is that it owns this logic rather than borrowing it. These
  * imports exist so the tests can assert that owning it produced the same
  * answers.

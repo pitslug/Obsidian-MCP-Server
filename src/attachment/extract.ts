@@ -4,7 +4,7 @@
  * The important distinction, and the one that decides whether any of this is
  * useful for a given vault: extraction reads the text a PDF already contains.
  * It is not recognition. A PDF of handwriting has a text layer only if
- * something put one there — OneNote's handwriting recognition does, a scanner
+ * something put one there - OneNote's handwriting recognition does, a scanner
  * without OCR does not, and a pen-on-tablet export usually does not either.
  *
  * When there is no text layer this says so, loudly and specifically, rather

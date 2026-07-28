@@ -61,7 +61,7 @@ export class SizeMismatchError extends Error {
  * True for documents that represent a file in the vault.
  *
  * A missing `type` means a pre-chunking legacy note, which upstream still
- * reads — the oldest documents in a long-lived vault have no `type` at all.
+ * reads - the oldest documents in a long-lived vault have no `type` at all.
  */
 export function isFileEntry(doc: { type?: unknown; _id?: unknown; data?: unknown }): boolean {
     if (doc.type === TYPE_NOTE_PLAIN || doc.type === TYPE_NOTE_BINARY) return true;
@@ -81,8 +81,8 @@ export function isDeleted(doc: { deleted?: boolean; _deleted?: boolean }): boole
 /**
  * Whether a document's content is text.
  *
- * Upstream checks `type`, then the in-memory `datatype` — which it sets from
- * `type` when responding — then falls back to the file extension. The third
+ * Upstream checks `type`, then the in-memory `datatype` - which it sets from
+ * `type` when responding - then falls back to the file extension. The third
  * check is reached for `newnote` documents too, so a `newnote` at a plain-text
  * path reads as text upstream, and must here as well: treating it as binary
  * would base64-decode ordinary prose into noise, silently.
@@ -169,7 +169,7 @@ function verifySize(file: AssembledFile): void {
 /**
  * `eden` was an inline-chunk optimisation: a chunk referenced by `children` may
  * exist only there. Current clients always write `{}`, but a vault with
- * `useEden` on will have documents this cannot read — so it says so, rather
+ * `useEden` on will have documents this cannot read - so it says so, rather
  * than reporting the chunks as missing and leaving the caller unable to
  * satisfy a request that can never be satisfied.
  */
@@ -211,7 +211,7 @@ function chunkParts(
     return parts;
 }
 
-/** Standard base64, strictly — anything else means the payload is not what we think. */
+/** Standard base64, strictly - anything else means the payload is not what we think. */
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 /**

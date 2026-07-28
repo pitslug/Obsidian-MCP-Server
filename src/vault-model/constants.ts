@@ -56,10 +56,10 @@ export const PREFIX_ENCRYPTED_CHUNK = "h:+";
 /** Appended to a chunk hash when E2EE is on. */
 export const HASH_ENCRYPTED_MARKER = "+";
 
-/** Internal data container — hidden file sync (`.obsidian/...`). */
+/** Internal data container - hidden file sync (`.obsidian/...`). */
 export const PREFIX_INTERNAL = "i:";
 export const PREFIX_INTERNAL_END = "i;";
-/** Internal data container eXtended — customisation sync. */
+/** Internal data container eXtended - customisation sync. */
 export const PREFIX_INTERNAL_X = "ix:";
 /** Plug-in Stored Container (obsolete). */
 export const PREFIX_PLUGIN_STORE = "ps:";
@@ -81,7 +81,7 @@ export const CHUNK_ID_RANGE_END = "h:\u{10ffff}";
 /**
  * Prepended to the truncated passphrase before deriving the chunk-hash salt.
  *
- * Note the `\u0003` — the published `dist` shows this string with the control
+ * Note the `\u0003` - the published `dist` shows this string with the control
  * character stripped by the bundler in some builds. The value used here matches
  * the TypeScript source. Verified against the runtime by the differential tests.
  */
@@ -111,7 +111,7 @@ export const EDEN_ENCRYPTED_KEY_V1 = "h:++encrypted";
 // --- Compression ------------------------------------------------------------
 // commonlib: src/pouchdb/compress.ts
 
-/** `\u000E L Z \u001D` — marks a deflate-compressed `data` field. */
+/** `\u000E L Z \u001D` - marks a deflate-compressed `data` field. */
 export const MARK_SHIFT_COMPRESSED = "\u000ELZ\u001D";
 /** Marks that the pre-deflate payload was itself base64 and was decoded first. */
 export const MARK_COMPRESSED_WAS_BASE64 = "~";

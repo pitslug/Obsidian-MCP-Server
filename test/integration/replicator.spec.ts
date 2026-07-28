@@ -3,7 +3,7 @@
  *
  * The property that matters most here is negative: replication is pull-only,
  * and nothing this code does may modify the remote. That is asserted by
- * mutating the local replica and then checking the remote is untouched — the
+ * mutating the local replica and then checking the remote is untouched - the
  * failure mode being guarded against is a future edit that turns `replicate.from`
  * into `sync`, which would look harmless in review and would push local drift
  * to every device.

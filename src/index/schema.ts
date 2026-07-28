@@ -32,8 +32,11 @@ CREATE TABLE IF NOT EXISTS notes (
     ctime         INTEGER NOT NULL,
     mtime         INTEGER NOT NULL,
     chunk_count   INTEGER NOT NULL DEFAULT 0,
-    -- For attachments: whether text could be extracted, and why not.
-    -- 'extracted' | 'no-text-layer' | 'not-textual' | 'failed' | NULL for notes.
+    -- For attachments: what became of their text, and why. The domain is the
+    -- ExtractionState union in index.ts, which is the authority:
+    --   'extracted' | 'transcribed' | 'transcribed-stale' | 'no-text-layer'
+    --   'not-textual' | 'skipped' | 'failed'
+    -- NULL means never attempted; for a text note it means nothing at all.
     extraction        TEXT,
     extraction_reason TEXT,
     -- Set when frontmatter was present but unparseable. Surfaced rather than

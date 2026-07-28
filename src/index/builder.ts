@@ -3,7 +3,7 @@
  *
  * A full build walks every file document; after that, the replica's changes
  * feed drives incremental updates. The index is a derived artifact, so a build
- * that fails partway is not a problem to recover from — it is a reason to
+ * that fails partway is not a problem to recover from - it is a reason to
  * rebuild.
  *
  * Notes that cannot be assembled are skipped and counted rather than aborting
@@ -18,6 +18,7 @@ import type { Logger } from "../server/logger.js";
 import { entryPath, isDeleted, isFileEntry } from "../vault-model/index.js";
 import { CHUNK_ID_RANGE_END, PREFIX_CHUNK } from "../vault-model/constants.js";
 import { extractAttachment } from "../attachment/extract.js";
+import { isTranscriptStale, type TranscriptStore } from "../attachment/transcripts.js";
 
 const FILE_RANGES: [string, string][] = [
     ["", "_"],
@@ -36,6 +37,8 @@ export interface BuildResult {
 export interface IndexBuilderOptions {
     /** Skip extraction for attachments larger than this. */
     extractionSizeCap: number;
+    /** Stored transcriptions, indexed in preference to extracted text. */
+    transcripts?: TranscriptStore;
 }
 
 export class IndexBuilder {
@@ -64,6 +67,23 @@ export class IndexBuilder {
 
         if (file.kind !== "binary") {
             this.index.put(file);
+            return;
+        }
+
+        // Consulted before the size cap and before extraction. For ink from a
+        // handwriting plugin there is nothing to extract at all, so a stored
+        // transcription is the only thing that ever makes those pages
+        // searchable, and looking it up costs nothing however large the file.
+        const transcript = this.options.transcripts?.get(path);
+        if (transcript) {
+            const stale = isTranscriptStale(transcript, file.size, file.mtime);
+            this.index.put(file, {
+                outcome: stale ? "transcribed-stale" : "transcribed",
+                text: transcript.text,
+                reason: stale
+                    ? "The attachment has changed since this transcription was made."
+                    : undefined,
+            });
             return;
         }
 

@@ -11,7 +11,7 @@
  *   `h:+…`   chunk with an encrypted payload
  *   `syncinfo`  payload encrypted like a chunk
  *   `f:…`    file document with obfuscated ID; its metadata is protected
- *   `_local/…`  never transformed — which is what makes the PBKDF2 salt
+ *   `_local/…`  never transformed - which is what makes the PBKDF2 salt
  *               readable before anything can be decrypted
  *
  * Note the consequence for documents with a path prefix: hidden-file and
@@ -145,8 +145,8 @@ export async function decodeDocument<T extends AnyDocument>(document: T, ctx: Tr
 /**
  * Recover the fields hidden inside an obfuscated document's `path`.
  *
- * Under E2EE v2 that is the whole metadata object — path, times, size and the
- * chunk list — which is why the cleartext document shows zeroed timestamps and
+ * Under E2EE v2 that is the whole metadata object - path, times, size and the
+ * chunk list - which is why the cleartext document shows zeroed timestamps and
  * an empty `children` until this runs. Under V1 only the path itself is
  * protected.
  */
@@ -197,7 +197,7 @@ export async function encodeDocument<T extends AnyDocument>(
     const doc = { ...(document as unknown as Doc) };
     if (isUntransformable(doc)) return doc as unknown as T;
 
-    // The ID prefix alone is not sufficient — see TransformContext.encryptChunks.
+    // The ID prefix alone is not sufficient - see TransformContext.encryptChunks.
     const shouldEncryptPayload = (ctx.encryptChunks && isEncryptedChunkId(doc._id)) || isSyncInfoId(doc._id);
     const shouldProtectMeta = isObfuscatedId(doc._id);
 
@@ -261,7 +261,7 @@ export async function encodeDocument<T extends AnyDocument>(
 /**
  * Whether a payload still carries a ciphertext marker.
  *
- * Called on the way in to assembly, not merely on the way out of decoding — a
+ * Called on the way in to assembly, not merely on the way out of decoding - a
  * caller that forgets to decode is the realistic mistake, and it produces
  * content that looks like a note rather than an error.
  */

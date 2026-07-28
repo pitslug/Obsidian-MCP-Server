@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# Debian rather than Alpine, deliberately. `leveldown` — which backs the local
-# PouchDB replica — ships prebuilt binaries for glibc but not musl, so Alpine
+# Debian rather than Alpine, deliberately. `leveldown` - which backs the local
+# PouchDB replica - ships prebuilt binaries for glibc but not musl, so Alpine
 # would force a native compile at image build time: a C++ toolchain in the
 # image, a slower build, and a new way for the thing to break on an unrelated
 # day. The extra ~120 MB buys a build with no compiler in it.

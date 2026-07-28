@@ -3,7 +3,7 @@
  *
  * Every device that syncs publishes its own copy into the milestone document.
  * If two disagree about a setting that changes the storage format, that is a
- * real problem in the vault — the plugin blocks sync on it — and guessing a
+ * real problem in the vault - the plugin blocks sync on it - and guessing a
  * winner here would turn a visible problem into a silent one.
  */
 

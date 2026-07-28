@@ -4,7 +4,7 @@
  * Everything here delegates the actual cryptography to `octagonal-wheels`, the
  * same package the plugin uses. Reimplementing AES-GCM key derivation to
  * match a specific 16-byte-IV legacy quirk would be a way to lose a vault for
- * no benefit; what this file owns is the *layering* — which fields of which
+ * no benefit; what this file owns is the *layering* - which fields of which
  * documents are encrypted, and in what order relative to compression.
  *
  * Four wire formats exist. Only the first is produced by current clients; the
@@ -156,7 +156,7 @@ export async function encryptPayload(data: string, ctx: CryptoContext): Promise<
  * Obfuscate a path for the legacy (`V1`) scheme.
  *
  * Deterministic despite being AES-GCM: the salt and IV are derived from
- * `SHA-256(path || passphrase)`. Under E2EE v2 this is not used — the whole
+ * `SHA-256(path || passphrase)`. Under E2EE v2 this is not used - the whole
  * metadata object is encrypted into `path` instead.
  */
 export async function obfuscatePathV1(path: string, ctx: CryptoContext): Promise<string> {

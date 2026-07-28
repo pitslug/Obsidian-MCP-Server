@@ -3,7 +3,7 @@
  *
  * The plugin hashes through a vendored, patched copy of `xxhash-wasm@1.0.2`
  * that ships inside `octagonal-wheels`. We depend on the unpatched package
- * directly, so the first thing worth proving is that the two agree — if they
+ * directly, so the first thing worth proving is that the two agree - if they
  * ever diverge, every chunk ID we compute is wrong and deduplication silently
  * stops working.
  *
@@ -78,7 +78,7 @@ describe("salt constants", () => {
 });
 
 describe("chunk IDs", () => {
-    it("are pure content hashes — no path, position or revision input", async () => {
+    it("are pure content hashes - no path, position or revision input", async () => {
         const hasher = await ChunkHasher.create({
             hashAlg: HashAlgorithms.XXHASH64,
             encrypt: false,

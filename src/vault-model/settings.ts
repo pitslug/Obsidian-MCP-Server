@@ -1,7 +1,7 @@
 /**
  * The subset of LiveSync settings that changes the storage format.
  *
- * Getting any of these wrong does not fail loudly — it silently produces
+ * Getting any of these wrong does not fail loudly - it silently produces
  * documents the plugin cannot read, or duplicate documents at new IDs. They
  * should be read from the vault's own milestone document (`tweak_values`)
  * rather than assumed; see `readTweakValues`.
@@ -102,7 +102,7 @@ export const SELF_HOSTED_PRESET: Partial<VaultFormatSettings> = {
  *
  * The validation is not ceremony. This is the only function in the vault model
  * that ingests data from outside, and a string `"false"` arriving where a
- * boolean belongs is truthy — which for `handleFilenameCaseSensitive` means
+ * boolean belongs is truthy - which for `handleFilenameCaseSensitive` means
  * every document ID gets the wrong casing and every write creates a duplicate,
  * silently.
  */
@@ -133,7 +133,7 @@ const TWEAK_ENUMS: Record<string, readonly string[]> = {
  *
  * Every device that has synced publishes its own tweak values. If two devices
  * disagree on a setting that changes the storage format, that is a real problem
- * in the vault — the plugin itself blocks sync on it — so this reports the
+ * in the vault - the plugin itself blocks sync on it - so this reports the
  * disagreement rather than picking a winner.
  */
 export function readTweakValues(milestone: MilestoneEntry | undefined): {

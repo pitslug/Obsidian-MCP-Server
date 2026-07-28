@@ -6,7 +6,7 @@ writable by Claude, by speaking directly to the CouchDB that already backs that
 sync.
 
 The vault is never materialised as files. There is no second copy of the notes
-on disk for another program to serve — this understands LiveSync's storage
+on disk for another program to serve - this understands LiveSync's storage
 format natively and exposes that understanding as MCP tools.
 
 See [`docs/design.md`](docs/design.md) for the full design.
@@ -14,23 +14,24 @@ See [`docs/design.md`](docs/design.md) for the full design.
 ## Status
 
 **In progress.** A read-only vertical slice runs end to end: it replicates a
-real vault and serves it over MCP. Search, attachments and every write path are
-still to come.
+real vault, indexes it and serves it over MCP, with search. Every write path to
+the vault is still to come.
 
 | Unit | State |
 | --- | --- |
 | Vault model | Verified against a live vault |
-| Replicator | Implemented — pull-only, decoding at the boundary |
+| Replicator | Implemented - pull-only, decoding at the boundary |
 | Note parsing | Frontmatter, tags, wikilinks, headings |
 | Index | SQLite with FTS5: search, properties, tags, link graph |
 | Attachments | PDF text extraction, indexed and retrievable |
-| Tool layer | Eleven read tools |
+| Handwriting | Transcriptions stored durably, and indexed |
+| Tool layer | Thirteen tools, none of which writes to the vault |
 | Transport | stdio and streamable HTTP, bearer token |
 | Deployment | Dockerfile and Compose for the target stack |
 | Write executor | Not started, deliberately |
-| OAuth 2.0 + PKCE | Not started — bearer token in the interim |
+| OAuth 2.0 + PKCE | Not started - bearer token in the interim |
 
-303 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
+342 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
 see below.
 
 ## Running it
@@ -69,6 +70,63 @@ registered at all. A tool that exists and reports "not implemented" is worse
 than no tool: a model will call it, and the user will conclude that writing is
 one setting away.
 
+`save_transcription` is the one tool that stores something, and it stays
+available under `READ_ONLY` because there is no code path from it to CouchDB.
+The read-only setting is about the vault; a transcription is written to a local
+database this server owns, and the original file is never touched. An
+integration test asserts that by reading the attachment's document revision back
+out of CouchDB after a transcription is saved.
+
+## Handwritten notes
+
+The vault this was built for is largely handwritten: pages of ink exported as
+PDFs by an Obsidian plugin. Those files have no text layer at all, so extraction
+finds nothing in them and OCR does badly on cursive. The transcriber that works
+is a model reading the page - which this server cannot do, because it has no
+model. What it can do is hold the page up and keep what comes back.
+
+```
+list_untranscribed   what has no searchable text, and what has gone out of date
+get_attachment       hands over the PDF itself when there is no text to extract
+save_transcription   stores the reading; it is searchable immediately
+```
+
+Transcriptions live in their own SQLite file, not in the index, and that
+separation is the important design decision. The index is a cache: it is dropped
+and rebuilt whenever its schema moves, and everything in it can be recomputed
+from the replica. A transcription cannot be recomputed by anything. It is the
+only data in the system whose loss is permanent, and the rest of its handling
+follows from that:
+
+- **Its own file, and never dropped by a rebuild.** An integration test starts a
+  server, saves a transcription, throws the index and the replica away, starts
+  again, and asserts the handwriting is still searchable. Deleting the fifteen
+  lines that read the store back makes that test fail, which is the point: the
+  suite previously passed with those lines removed entirely.
+- **`journal_mode = DELETE`, against the usual advice.** WAL keeps recent
+  commits in a sidecar file until a checkpoint, so a file-level nightly backup
+  can copy a database missing its newest rows, or a torn one. Writes here are a
+  few a day, so there is no throughput to trade away for a single
+  self-contained file. `synchronous = FULL` for the same reason.
+- **Superseded text is kept.** The likeliest way to lose a transcription is not
+  a crash, it is a second, worse reading overwriting a first: a model that runs
+  out of room after page one of a forty-page notebook will call
+  `save_transcription` with a fragment quite happily. What it replaced goes to a
+  history table in the same transaction.
+- **A schema it does not recognise refuses to open.** The index answers that
+  question by dropping everything and rebuilding, which is the one response
+  unavailable here. A server that will not start is recoverable.
+
+Each transcription records the size and modification time of the file it was
+made from. Add another line of ink to a page and the transcription is reported
+as out of date rather than left in the index quietly describing an older version
+of it.
+
+Renaming a file in Obsidian is a delete and a create, so a transcription keyed
+on the old path comes unattached. Nothing deletes it, but `list_untranscribed`
+and the startup log both report it, so the page does not silently reappear in
+the queue with the reading already paid for sitting unreachable beside it.
+
 ## Why the vault model came first
 
 It is the unit whose failure is unrecoverable. Everything else can be wrong in
@@ -76,8 +134,8 @@ ways you notice: a replication bug stalls, an index bug returns nothing, a tool
 bug throws. A vault model bug writes a note that comes back subtly altered, and
 you find out weeks later.
 
-So it is built as pure functions — no network, no database handle, documents in
-and a note out — which is what allows it to be tested three ways:
+So it is built as pure functions - no network, no database handle, documents in
+and a note out - which is what allows it to be tested three ways:
 
 - **Round-trip property tests.** Splitting a note into chunks and reassembling
   it is the identity function, across empty files, very large files, unicode,
@@ -89,8 +147,8 @@ and a note out — which is what allows it to be tested three ways:
   actually running, and requires agreement. This is the strongest evidence
   available short of a real vault.
 - **Failure-mode tests.** Most of the assembly suite asserts that the *error*
-  happens — a missing chunk, an undecoded document, a payload that is not valid
-  base64 — rather than that the success does.
+  happens - a missing chunk, an undecoded document, a payload that is not valid
+  base64 - rather than that the success does.
 
 ## What the model owns
 
@@ -124,7 +182,7 @@ Three things the design flagged as assumptions, now settled:
   Recovering a path from an ID is impossible; recovering it from the decrypted
   `path` field is routine. Writing to an existing obfuscated path means
   recomputing the identical hash, so path normalisation has to match Obsidian's
-  exactly — including NFC composition and non-breaking-space folding.
+  exactly - including NFC composition and non-breaking-space folding.
 - **The E2EE v2 metadata seal is not idempotent.** Encrypting an
   already-encrypted document destroys its chunk list irrecoverably while leaving
   a document that still reads cleanly as an empty note. Guarded, and tested
@@ -133,7 +191,7 @@ Three things the design flagged as assumptions, now settled:
 Two things deliberately not implemented, and why:
 
 - **The V1 and V2 chunk splitters.** Chunk boundaries do not affect
-  correctness — the plugin reassembles whatever it is given — only
+  correctness - the plugin reassembles whatever it is given - only
   deduplication. Implementing two more splitters to save bandwidth on a vault
   that almost certainly uses the current default is not worth the surface area.
   Writing to such a vault throws unless `allowSplitterFallback` is set.
@@ -144,9 +202,9 @@ Two things deliberately not implemented, and why:
 ## Verifying against a real vault
 
 `scripts/verify-vault.ts` points at a live LiveSync database and checks that
-this code understands it. It is **read-only by construction** — the only
+this code understands it. It is **read-only by construction** - the only
 request method in the file is `GET`, and a test asserts that a full run issues
-nothing else — so it is safe against a production vault.
+nothing else - so it is safe against a production vault.
 
 ```bash
 npm run verify -- --url 'https://user:password@couchdb.example.net/?db=obsidiandb'
@@ -167,12 +225,11 @@ does; a scanner without OCR does not. Run it before assuming either way.
 `--census` walks the entire ID space instead and reports where every document
 went: counts by type, live versus deleted files, notes versus hidden-file sync,
 and how much of the chunk store is orphaned. Most documents in a LiveSync
-database are chunks, not notes, so `doc_count` is a poor proxy for vault size —
-the census is what tells you the difference.
+database are chunks, not notes, so `doc_count` is a poor proxy for vault size - the census is what tells you the difference.
 
 Useful flags: `--all` to verify every file in the vault rather than a sample,
 `--sample N`, `--passphrase` for an encrypted vault, `--verbose` for per-file
-output, and `--capture out.json` to save real documents as fixtures — that file
+output, and `--capture out.json` to save real documents as fixtures - that file
 contains note content, so do not commit it.
 
 The sample is spread evenly across the whole ID range rather than taking the
@@ -193,7 +250,7 @@ npm run typecheck
 
 The differential tests import `@vrtmrz/livesync-commonlib` by explicit file
 path, because its package exports map does not expose the modules involved. That
-import lives in `test/helpers/upstream.ts` and must never appear in `src/` — the
+import lives in `test/helpers/upstream.ts` and must never appear in `src/` - the
 point of the vault model is that it owns this logic rather than borrowing it.
 
 ## Licence

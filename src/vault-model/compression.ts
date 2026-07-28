@@ -63,8 +63,8 @@ const inflateAsync = (input: Bytes): Promise<Bytes> =>
 /**
  * Compress a `data` field, or return it unchanged if compression does not help.
  *
- * A payload that is itself valid base64 is decoded to bytes first — deflating
- * base64 text wastes a quarter of the input — and the result is marked with `~`
+ * A payload that is itself valid base64 is decoded to bytes first - deflating
+ * base64 text wastes a quarter of the input - and the result is marked with `~`
  * so the reader knows to re-encode.
  */
 export async function compressData(data: string): Promise<string> {

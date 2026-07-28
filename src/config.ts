@@ -3,12 +3,12 @@
  *
  * Environment variables throughout, with no config file, so nothing holding a
  * secret needs to sit on disk as a mounted file. Every sensitive value also
- * accepts a `*_FILE` form naming a file to read it from — that is how Docker
+ * accepts a `*_FILE` form naming a file to read it from - that is how Docker
  * secrets are consumed, and it is what the deployment this targets requires.
  *
  * The E2EE passphrase, where set, means this host holds the keys to the entire
- * vault. That is inherent to the goal rather than a flaw in the design — something
- * has to decrypt the notes — but it should inform how the host is secured.
+ * vault. That is inherent to the goal rather than a flaw in the design - something
+ * has to decrypt the notes - but it should inform how the host is secured.
  */
 
 import { readFileSync } from "node:fs";
@@ -29,8 +29,7 @@ export class ConfigError extends Error {
 /**
  * Read a value from `NAME`, or from the file named by `NAME_FILE`.
  *
- * The file form wins when both are set, and a trailing newline is stripped —
- * `echo secret > file` is how these get created, and the newline would
+ * The file form wins when both are set, and a trailing newline is stripped - * `echo secret > file` is how these get created, and the newline would
  * otherwise become part of the password.
  */
 function env(name: string, fallback?: string): string | undefined {
@@ -90,11 +89,18 @@ export interface Config {
     replicaPath: string;
     /** Where the SQLite index will live. Both are derived and safe to destroy. */
     indexPath: string;
+    /**
+     * Where transcriptions live.
+     *
+     * Deliberately a separate file from the index: a transcription cannot be
+     * recomputed from anything, so it must survive an index rebuild.
+     */
+    transcriptPath: string;
 
     /**
      * Format settings supplied by configuration. Anything not set here is read
      * from the vault's own milestone document at startup, which is the more
-     * reliable source — see `readTweakValues`.
+     * reliable source - see `readTweakValues`.
      */
     formatOverrides: Partial<VaultFormatSettings>;
 
@@ -156,6 +162,7 @@ export function loadConfig(): Config {
         },
         replicaPath: env("REPLICA_PATH", "/data/replica") as string,
         indexPath: env("INDEX_PATH", "/data/index.sqlite") as string,
+        transcriptPath: env("TRANSCRIPT_PATH", "/data/transcripts.sqlite") as string,
         formatOverrides: readFormatOverrides(),
         readOnly,
         attachmentSizeCap: integer("ATTACHMENT_SIZE_CAP", 25 * 1024 * 1024),

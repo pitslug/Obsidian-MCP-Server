@@ -15,7 +15,11 @@ services:
     ports:
       - "$OBSIDIAN_MCP_PORT:8080"
     volumes:
-      - $DATADIR/obsidian-mcp:/data           # local replica; derived data, safe to destroy
+      # Holds the replica and index (both derived, safe to destroy) alongside
+      # transcripts.sqlite, which is NOT derived: nothing can recompute a
+      # transcription of a handwritten page. $DATADIR is what the nightly
+      # backup captures, which is why it lives here and not in a scratch path.
+      - $DATADIR/obsidian-mcp:/data
     secrets:
       - obsidian_mcp_couchdb_password
       - obsidian_mcp_bearer_token

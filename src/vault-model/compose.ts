@@ -3,7 +3,7 @@
  *
  * Pure, like assembly: this decides what should be written, and hands back
  * documents for someone else to PUT. It performs no I/O and makes no decisions
- * about revisions or conflict handling — those belong to the write executor,
+ * about revisions or conflict handling - those belong to the write executor,
  * which is the only unit permitted a state-changing request.
  */
 
@@ -36,7 +36,7 @@ export interface ComposeOptions {
 /**
  * Compose the documents that persist a file's content.
  *
- * `size` is the byte length of the content, not the character length — for text
+ * `size` is the byte length of the content, not the character length - for text
  * that is the UTF-8 length. Getting this wrong is cosmetic in Obsidian but shows
  * up in the plugin's own consistency reporting, so it is computed rather than
  * approximated.

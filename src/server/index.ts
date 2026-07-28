@@ -3,7 +3,7 @@
  *
  * Startup order matters and is deliberate. The vault's own format settings are
  * read from CouchDB *before* replication begins, because they determine how
- * every document is decoded — starting replication first would mean decoding
+ * every document is decoded - starting replication first would mean decoding
  * the first batch under assumed settings.
  */
 
@@ -22,10 +22,11 @@ import {
 } from "../vault-model/index.js";
 import { Replicator } from "../replicator/index.js";
 import { VaultReader } from "../vault/reader.js";
-import { registerAttachmentTool, registerTools } from "./tools.js";
+import { registerAttachmentTool, registerTools, registerTranscriptionTools } from "./tools.js";
 import { registerSearchTools } from "./search-tools.js";
 import { VaultIndex } from "../index/index.js";
 import { IndexBuilder } from "../index/builder.js";
+import { TranscriptStore } from "../attachment/transcripts.js";
 import { loadConfig, redactedUrl, remoteUrl, type Config } from "../config.js";
 import { createLogger, type Logger } from "./logger.js";
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
@@ -87,7 +88,7 @@ function createRemoteReader(config: Config, log: Logger) {
  * Determine the vault's storage format.
  *
  * Read from the vault rather than assumed. A disagreement between devices is a
- * real problem — the plugin blocks sync on it — so it is reported rather than
+ * real problem - the plugin blocks sync on it - so it is reported rather than
  * resolved by picking a winner, and configuration is the only way to override.
  */
 async function resolveVaultSettings(
@@ -175,8 +176,15 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     // nothing but the rebuild.
     const index = new VaultIndex(config.indexPath);
     index.open();
+
+    // Separate from the index, and deliberately so: a transcription cannot be
+    // recomputed from the vault, so it must outlive an index rebuild.
+    const transcripts = new TranscriptStore(config.transcriptPath);
+    transcripts.open();
+
     const builder = new IndexBuilder(replicator, reader, index, log, {
         extractionSizeCap: config.attachmentSizeCap,
+        transcripts,
     });
     await builder.rebuild();
     builder.follow();
@@ -222,9 +230,11 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         settings,
         readOnly: config.readOnly,
         attachmentSizeCap: config.attachmentSizeCap,
+        transcripts,
     };
     registerTools(server, toolContext);
     registerAttachmentTool(server, toolContext);
+    registerTranscriptionTools(server, toolContext);
     registerSearchTools(server, { index });
 
     if (config.transport.kind === "stdio") {
@@ -238,13 +248,31 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         log.info(`Serving on http://${config.transport.host}:${config.transport.port}/mcp`);
     }
 
-    if (config.readOnly) log.info("Read-only mode: no write tools are registered.");
+    if (config.readOnly) {
+        // Worded carefully. save_transcription is registered and does write, so
+        // "no write tools" would be false; what is true, and what the setting
+        // is for, is that nothing registered can modify the vault.
+        log.info("Read-only mode: no tool that can modify the vault is registered.");
+    }
+
+    const orphans = transcripts.orphans(new Set(index.allPaths()));
+    if (orphans.length > 0) {
+        log.warn(
+            `${orphans.length} stored transcription(s) do not match any file in the vault, ` +
+                `probably renamed: ${orphans
+                    .slice(0, 5)
+                    .map((o) => o.path)
+                    .join(", ")}${orphans.length > 5 ? ", …" : ""}. ` +
+                `They are kept; list_untranscribed reports them.`
+        );
+    }
 
     return {
         async stop() {
             await server.stop();
             builder.stop();
             index.close();
+            transcripts.close();
             await replicator.stop();
         },
     };

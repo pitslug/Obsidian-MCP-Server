@@ -20,7 +20,7 @@ silently misread. See "Detecting drift" at the end.
 ## Document types
 
 The discriminator is `type`. Note that `datatype`, which appears throughout the
-plugin source, is **never persisted** — it exists only on in-memory objects.
+plugin source, is **never persisted** - it exists only on in-memory objects.
 
 | `type` | Meaning |
 | --- | --- |
@@ -52,7 +52,7 @@ explicitly rather than reporting their chunks as missing.
 
 ## Paths and document IDs
 
-Without obfuscation, the ID is the path verbatim — lowercased unless
+Without obfuscation, the ID is the path verbatim - lowercased unless
 `handleFilenameCaseSensitive`, with a `/` inserted in front if it starts with
 `_`, because CouchDB reserves leading-underscore IDs.
 
@@ -71,8 +71,8 @@ Three consequences worth stating plainly:
   the ID is lowercased while `path` keeps the real casing. Reads must take the
   path from the `path` field.
 - **Writing to an existing path means recomputing the same hash from the same
-  input string.** Any difference — case folding, unicode normalisation, a
-  prefix — creates a duplicate document rather than updating the original.
+  input string.** Any difference - case folding, unicode normalisation, a
+  prefix - creates a duplicate document rather than updating the original.
 
 Obsidian normalises a path before this mapping: separators collapsed, leading
 and trailing slashes stripped, `U+00A0` and `U+202F` folded to a space, and NFC
@@ -87,9 +87,8 @@ document nothing will ever read.
 ## Chunking
 
 Four splitters exist; the default since the current release is
-`v3-rabin-karp`. Chunk boundaries are **not** part of the correctness contract —
-a file is reassembled by concatenating `children` in order, whatever produced
-them — but they are part of the *deduplication* contract. Chunks are shared only
+`v3-rabin-karp`. Chunk boundaries are **not** part of the correctness contract - a file is reassembled by concatenating `children` in order, whatever produced
+them - but they are part of the *deduplication* contract. Chunks are shared only
 if they are identical.
 
 The V3 splitter is a content-defined chunker with several properties that look
@@ -107,7 +106,7 @@ like bugs and must be reproduced anyway:
 Sizes are derived from the input length: text under 4 MiB uses a chunk unit that
 grows in steps of 32 bytes until the estimated chunk count falls to 500 or
 fewer. Text at or above 4 MiB switches to binary sizing but is still emitted as
-text — a corner easy to get wrong in either direction.
+text - a corner easy to get wrong in either direction.
 
 Text chunks are UTF-8 decoded strings, stored directly in JSON. A leading byte
 order mark is content and must survive; the decoder is constructed with
@@ -116,7 +115,7 @@ order mark is content and must survive; the decoder is constructed with
 ## Chunk identity
 
 A chunk's ID is a **pure content hash**. There is no per-document,
-per-revision, per-path or per-position salt — only, when E2EE is on, a single
+per-revision, per-path or per-position salt - only, when E2EE is on, a single
 vault-wide value derived from the passphrase.
 
 ```
@@ -140,7 +139,7 @@ write executor should log any case where a colliding ID has different local
 content.
 
 Four other hash algorithms are selectable. Under `sha1` the hash is base64, so
-roughly one unencrypted chunk in sixty-four begins with `+` — which means the
+roughly one unencrypted chunk in sixty-four begins with `+` - which means the
 `h:+` prefix is **not** a reliable marker of encryption on its own. The plugin
 avoids this only because it does not install the encryption transform at all
 when encryption is off.
@@ -189,8 +188,8 @@ The vault-wide PBKDF2 salt is base64 in
 
 ### Metadata protection
 
-Under E2EE v2, an obfuscated document's entire metadata object — path, times,
-size **and the chunk list** — is JSON-encrypted into `path` behind the prefix
+Under E2EE v2, an obfuscated document's entire metadata object - path, times,
+size **and the chunk list** - is JSON-encrypted into `path` behind the prefix
 `/\:`, and `mtime`, `ctime`, `size` are zeroed and `children` emptied on the
 wire.
 
@@ -202,7 +201,7 @@ emptied chunk list, destroying the only record of the note's content while
 leaving a document that still reads cleanly. The plugin guards this in two
 places; so must anything else that writes.
 
-Under legacy E2EE only `path` is protected, deterministically — the salt and IV
+Under legacy E2EE only `path` is protected, deterministically - the salt and IV
 are derived from `SHA-256(path ‖ passphrase)`, so the same path always yields
 the same ciphertext.
 
@@ -216,8 +215,7 @@ These cannot be assumed. Every device publishes its own copy into
 `handleFilenameCaseSensitive`, `minimumChunkSize`, `customChunkSize`,
 `useSegmenter`, `useEden`.
 
-If two devices disagree on one of these, that is a real problem in the vault —
-the plugin itself blocks sync on it — and it should be reported rather than
+If two devices disagree on one of these, that is a real problem in the vault - the plugin itself blocks sync on it - and it should be reported rather than
 resolved by picking a winner.
 
 Values must also be type-checked. A string `"false"` where a boolean belongs is
@@ -228,8 +226,7 @@ the wrong casing and every write creates a duplicate, silently.
 
 `encrypt`, `usePathObfuscation`, `useDynamicIterationCount` and
 `handleFilenameCaseSensitive` are in the plugin's `IncompatibleChanges` list.
-Changing any of them is not a setting change that takes effect going forward —
-it invalidates every document already in the database, and the plugin requires
+Changing any of them is not a setting change that takes effect going forward - it invalidates every document already in the database, and the plugin requires
 rebuilding both the local and the remote database.
 
 Concretely, enabling E2EE on a vault that does not have it:
@@ -255,7 +252,7 @@ Practical sequence, since the migration is a rebuild:
 1. Run `scripts/verify-vault.ts` before the change and keep the output.
 2. Do the migration from Obsidian, and let every device finish re-syncing.
 3. Re-run the verifier with `--passphrase`. Chunk IDs should now all start
-   `h:+`, and the re-chunk comparison should still pass — if it does, the write
+   `h:+`, and the re-chunk comparison should still pass - if it does, the write
    path is correct under encryption too.
 4. Only then take the read-only toggle off, if it was ever off.
 
@@ -276,7 +273,7 @@ encryption format. Three cheap checks:
 1. The database schema version in `obsydian_livesync_version` against
    `SUPPORTED_DB_VERSION` (currently 12).
 2. `tweak_values` for a `chunkSplitterVersion`, `hashAlg` or `E2EEAlgorithm`
-   this implementation does not recognise — `readTweakValues` reports these as
+   this implementation does not recognise - `readTweakValues` reports these as
    `invalid` rather than adopting them.
 3. Re-running the differential test suite after bumping the pinned
    `@vrtmrz/livesync-commonlib` version. That is what it is for.

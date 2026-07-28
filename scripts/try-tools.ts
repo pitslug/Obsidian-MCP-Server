@@ -8,8 +8,7 @@
  * one, and prints what came back.
  *
  * It goes through the real protocol rather than calling the tool functions
- * directly, so it exercises the transport, the schemas and the serialisation —
- * the parts that only fail once something is actually connected.
+ * directly, so it exercises the transport, the schemas and the serialisation - * the parts that only fail once something is actually connected.
  *
  * Read-only, like everything else pointed at the vault so far.
  *
@@ -30,7 +29,7 @@ const root = resolve(here, "..");
 const heading = (s: string) => `\n[1m${s}[0m`;
 const dim = (s: string) => `[2m${s}[0m`;
 
-/** Print a tool result, trimmed — a whole note would drown the output. */
+/** Print a tool result, trimmed - a whole note would drown the output. */
 function show(result: unknown, maxLines = 20): void {
     const content = (result as { content?: { type: string; text?: string }[] }).content ?? [];
     const text = content
@@ -68,6 +67,11 @@ async function main() {
             // would be shared with any other run on this machine, and a
             // different vault's notes would appear in the results.
             INDEX_PATH: process.env.INDEX_PATH ?? resolve(root, "tmp/index.sqlite"),
+            // Pinned too, but for the opposite reason: transcriptions are the
+            // one thing here that cannot be recreated from the vault, so a
+            // scratch run must not open a real store and must not be able to
+            // damage one.
+            TRANSCRIPT_PATH: process.env.TRANSCRIPT_PATH ?? resolve(root, "tmp/transcripts.sqlite"),
             // The server's own logs go to stderr and would interleave with
             // this output; keep them to real problems.
             LOG_LEVEL: process.env.LOG_LEVEL ?? "warn",
@@ -133,6 +137,38 @@ async function main() {
 
     console.log(heading("vault_health"));
     show(await client.callTool({ name: "vault_health", arguments: {} }), 20);
+
+    // Attachments that cannot be searched. On a vault of handwritten pages this
+    // is the interesting output: it is the work queue.
+    console.log(heading("list_untranscribed"));
+    const untranscribed = await client.callTool({ name: "list_untranscribed", arguments: {} });
+    show(untranscribed, 20);
+
+    // Deliberately stops at retrieval. Storing a transcription is a real,
+    // durable write, and a script whose job is to demonstrate the tools has no
+    // business putting invented text into the one store that cannot be rebuilt.
+    const first = ((untranscribed as { content?: { text?: string }[] }).content ?? [])
+        .map((part) => part.text ?? "")
+        .join("\n")
+        .split("\n")
+        .map((line) => line.replace(/\s{2}\[transcription out of date\]$/, "").trim())
+        .find((line) => /\.(pdf|png|jpe?g)$/i.test(line));
+
+    if (first) {
+        console.log(heading(`get_attachment: ${first}`));
+        const attachment = (await client.callTool({
+            name: "get_attachment",
+            arguments: { path: first },
+        })) as { content: { type: string; text?: string; resource?: { mimeType?: string } }[] };
+
+        for (const part of attachment.content) {
+            if (part.type === "text") console.log(`  ${(part.text ?? "").split("\n").join("\n  ")}`);
+            else if (part.type === "resource")
+                console.log(dim(`  [${part.resource?.mimeType ?? "binary"} handed over for reading]`));
+            else console.log(dim(`  [${part.type}]`));
+        }
+        console.log(dim("  Not transcribing here: save_transcription is a durable write."));
+    }
 
     await client.close();
     console.log("");

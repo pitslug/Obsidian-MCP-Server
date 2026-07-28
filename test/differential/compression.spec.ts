@@ -4,7 +4,7 @@
  * Both directions matter and they are not symmetric: we must be able to read
  * what the plugin wrote, and the plugin must be able to read what we write.
  * Deflate output is not guaranteed to be byte-identical across implementations,
- * so these assert on decoded content rather than on the encoded bytes — except
+ * so these assert on decoded content rather than on the encoded bytes - except
  * where the marker itself is the contract.
  */
 
@@ -112,7 +112,7 @@ describe("round trip", () => {
         expect(await decompressData("plain text")).toBe("plain text");
     });
 
-    it("is idempotent — compressing twice does not double-wrap", async () => {
+    it("is idempotent - compressing twice does not double-wrap", async () => {
         const once = await compressData("x".repeat(5000));
         expect(await compressData(once)).toBe(once);
     });
