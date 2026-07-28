@@ -300,7 +300,7 @@ describe("census", () => {
         docs = await buildVault({ encrypt: false }, { extraNotes: 20, binaries: 3 });
         const result = await runScript(["--census"]);
 
-        expect(result.out).toContain("Census — every document, by type");
+        expect(result.out).toContain("Census: every document, by type");
         expect(result.out).toMatch(/leaf \(chunk documents, counted by ID\)/);
         expect(result.out).toContain("Every file document falls inside the ranges the verifier walks.");
         expect(result.out).toMatch(/\d+ live, \d+ deleted/);

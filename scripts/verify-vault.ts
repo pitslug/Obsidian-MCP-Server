@@ -309,7 +309,7 @@ function inFileRanges(id: string): boolean {
  * pulling them would mean downloading the entire vault to count it.
  */
 async function census(client: ReadOnlyClient) {
-    console.log(heading("Census — every document, by type"));
+    console.log(heading("Census: every document, by type"));
 
     const byType = new Map<string, number>();
     const filePrefixes = new Map<string, number>();
@@ -388,7 +388,7 @@ async function census(client: ReadOnlyClient) {
         info(
             `${orphans} not referenced by any file document` +
                 (orphans > 0
-                    ? ` — ${((orphans / Math.max(1, chunks)) * 100).toFixed(0)}% of the chunk store`
+                    ? `, ${((orphans / Math.max(1, chunks)) * 100).toFixed(0)}% of the chunk store`
                     : "")
         )
     );
@@ -407,7 +407,7 @@ async function census(client: ReadOnlyClient) {
     } else {
         console.log(bad(`${outsideRanges} file document(s) fall OUTSIDE the ranges the verifier walks.`));
         console.log(info(`e.g. ${outsideExamples.join(", ")}`));
-        console.log(info("The verifier has been under-reporting. This is a bug — report it."));
+        console.log(info("The verifier has been under-reporting. This is a bug; report it."));
         process.exitCode = 1;
     }
     console.log("");
@@ -425,7 +425,7 @@ async function main() {
     console.log(heading("Connection"));
     const dbInfo = await client.dbInfo();
     if (!dbInfo) fail(`Database "${options.db}" not found, or credentials rejected.`);
-    console.log(ok(`Connected to "${dbInfo.db_name}" — ${dbInfo.doc_count.toLocaleString()} documents`));
+    console.log(ok(`Connected to "${dbInfo.db_name}": ${dbInfo.doc_count.toLocaleString()} documents`));
     console.log(info("Every request this script makes is a GET. Nothing is written."));
 
     // --- Settings ----------------------------------------------------------
@@ -433,7 +433,7 @@ async function main() {
     console.log(heading("Vault settings"));
     const milestone = await client.doc<MilestoneEntry>(DOCID_MILESTONE);
     if (!milestone) {
-        console.log(warn("No milestone document — no device has synced yet, or the ID differs."));
+        console.log(warn("No milestone document; no device has synced yet, or the ID differs."));
     }
 
     const { settings: published, conflicts, invalid, nodeCount } = readTweakValues(milestone);
@@ -445,7 +445,7 @@ async function main() {
         console.log(info("The plugin blocks sync on this. Resolve it in Obsidian before proceeding."));
     }
     for (const [key, value] of Object.entries(invalid)) {
-        console.log(warn(`Unrecognised value for "${key}": ${JSON.stringify(value)} — ignoring it`));
+        console.log(warn(`Unrecognised value for "${key}": ${JSON.stringify(value)}, ignoring it`));
     }
 
     const settings: VaultFormatSettings = resolveSettings({
@@ -495,7 +495,7 @@ async function main() {
                 `Database schema version ${version.version} ` +
                     (same
                         ? "(matches what this understands)"
-                        : `— this was built against ${SUPPORTED_DB_VERSION}`)
+                        : `this was built against ${SUPPORTED_DB_VERSION}`)
             )
         );
         if (!same) failures++;
@@ -618,7 +618,7 @@ async function main() {
             if (file.size > stats.largest.size) stats.largest = { path, size: file.size };
 
             if (options.verbose) {
-                console.log(ok(`${path} — ${file.kind}, ${file.size} bytes, ${children.length} chunk(s)`));
+                console.log(ok(`${path}: ${file.kind}, ${file.size} bytes, ${children.length} chunk(s)`));
             }
 
             // The important check: would our writer produce the same chunks?
@@ -666,7 +666,7 @@ async function main() {
         info(
             `${stats.text} text, ${stats.binary} binary` +
                 (stats.legacy > 0 ? `, ${stats.legacy} legacy (pre-chunking)` : "") +
-                ` — ${(stats.bytes / 1024).toFixed(0)} KiB total`
+                `, ${(stats.bytes / 1024).toFixed(0)} KiB total`
         )
     );
     console.log(
@@ -683,7 +683,7 @@ async function main() {
     if (stats.binary === 0) {
         console.log(
             warn(
-                "No binary files in this set — attachments are unverified. " +
+                "No binary files in this set, so attachments are unverified. " +
                     "Re-run with --all, or a larger --sample."
             )
         );
@@ -716,7 +716,7 @@ async function main() {
         console.log(
             warn(
                 `Wrote ${captured.length} document set(s) to ${options.capture}. ` +
-                    `This file contains real note content — do not commit it.`
+                    `This file contains real note content, so do not commit it.`
             )
         );
     }

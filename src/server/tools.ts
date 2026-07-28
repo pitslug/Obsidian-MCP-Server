@@ -15,12 +15,14 @@ import { z } from "zod";
 import type { FastMCP } from "fastmcp";
 import type { Replicator } from "../replicator/index.js";
 import type { VaultReader } from "../vault/reader.js";
+import type { VaultIndex } from "../index/index.js";
 import type { VaultFormatSettings } from "../vault-model/index.js";
 import { NoteNotFoundError } from "../vault/reader.js";
 
 export interface ToolContext {
     replicator: Replicator;
     reader: VaultReader;
+    index: VaultIndex;
     settings: VaultFormatSettings;
     readOnly: boolean;
     attachmentSizeCap: number;
@@ -45,11 +47,13 @@ export function registerTools(server: FastMCP, ctx: ToolContext): void {
         execute: async () => {
             const status = ctx.replicator.status();
             const docs = await ctx.replicator.refreshDocCount();
+            const indexed = ctx.index.count();
 
             const lines = [
                 `Replication: ${status.phase}${status.initialSyncComplete ? "" : " (initial sync in progress)"}`,
                 `Staleness: ${describeLag(status.lagMs)}`,
                 `Local replica: ${docs.toLocaleString()} documents, ${status.replicated.toLocaleString()} replicated this session`,
+                `Index: ${indexed.notes} file(s): ${indexed.text} text, ${indexed.binary} binary`,
                 `Writes: ${ctx.readOnly ? "disabled (read-only)" : "enabled"}`,
                 `Encryption: ${ctx.settings.encrypt ? "on" : "off"}` +
                     (ctx.settings.usePathObfuscation ? ", path obfuscation on" : ""),
@@ -144,7 +148,7 @@ export function registerTools(server: FastMCP, ctx: ToolContext): void {
             const footer = [
                 "",
                 `${result.notes.length} entr${result.notes.length === 1 ? "y" : "ies"}` +
-                    (result.truncated ? " (truncated — raise limit for more)" : ""),
+                    (result.truncated ? " (truncated, raise limit for more)" : ""),
                 `Replica: ${describeLag(result.lagMs)}.`,
             ];
 

@@ -23,6 +23,9 @@ import {
 import { Replicator } from "../replicator/index.js";
 import { VaultReader } from "../vault/reader.js";
 import { registerTools } from "./tools.js";
+import { registerSearchTools } from "./search-tools.js";
+import { VaultIndex } from "../index/index.js";
+import { IndexBuilder } from "../index/builder.js";
 import { loadConfig, redactedUrl, remoteUrl, type Config } from "../config.js";
 import { createLogger, type Logger } from "./logger.js";
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
@@ -167,6 +170,15 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
 
     const reader = new VaultReader({ replicator, settings, fetchRemote });
 
+    // The index is derived from the replica, so it is built after the first
+    // replication pass and then follows the changes feed. Destroying it costs
+    // nothing but the rebuild.
+    const index = new VaultIndex(config.indexPath);
+    index.open();
+    const builder = new IndexBuilder(replicator, reader, index, log);
+    await builder.rebuild();
+    builder.follow();
+
     const server = new FastMCP({
         name: "obsidian-vault",
         version: "0.1.0",
@@ -204,10 +216,12 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     registerTools(server, {
         replicator,
         reader,
+        index,
         settings,
         readOnly: config.readOnly,
         attachmentSizeCap: config.attachmentSizeCap,
     });
+    registerSearchTools(server, { index });
 
     if (config.transport.kind === "stdio") {
         await server.start({ transportType: "stdio" });
@@ -225,6 +239,8 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     return {
         async stop() {
             await server.stop();
+            builder.stop();
+            index.close();
             await replicator.stop();
         },
     };

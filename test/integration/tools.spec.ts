@@ -77,6 +77,22 @@ beforeAll(async () => {
         ["daily/2026-07-28.md", { kind: "text", text: NOTE }],
         ["projects/big.md", { kind: "text", text: BIG }],
         ["attachments/image.png", { kind: "binary", bytes: new Uint8Array(3000).fill(7) }],
+        [
+            "projects/house.md",
+            {
+                kind: "text",
+                text:
+                    "---\nstatus: active\npriority: 2\ntags: [home, finance]\n---\n\n" +
+                    "Refinancing the mortgage. See [[daily/2026-07-28]] and [[nowhere]].\n",
+            },
+        ],
+        [
+            "projects/shed.md",
+            {
+                kind: "text",
+                text: "---\nstatus: done\npriority: low\n---\n\nBuilt the shed. #home\n",
+            },
+        ],
     ] as [string, Parameters<typeof composeWrite>[1]][]) {
         const composed = await composeWrite(path, content, { settings: SETTINGS, now: 1_700_000_000_000 });
         await couch.seed("vault", [
@@ -116,7 +132,19 @@ describe("the tool surface", () => {
     it("advertises exactly the read tools, and no write tools", async () => {
         const { tools } = await client.listTools();
         const names = tools.map((t) => t.name).sort();
-        expect(names).toEqual(["list_notes", "read_note", "vault_status"]);
+        expect(names).toEqual([
+            "find_by_property",
+            "find_by_tag",
+            "list_notes",
+            "note_links",
+            "property_inventory",
+            "read_note",
+            "search_notes",
+            "tag_inventory",
+            "vault_health",
+            "vault_status",
+        ]);
+        expect(names.some((name) => /write|create|append|delete|update|set_/.test(name))).toBe(false);
     });
 
     it("describes each tool well enough to be chosen correctly", async () => {
@@ -200,5 +228,84 @@ describe("read_note", () => {
         // The schema is the only thing stopping a malformed call reaching the
         // reader, so it is worth knowing it is enforced.
         await expect(client.callTool({ name: "read_note", arguments: { path: 42 } })).rejects.toThrow();
+    });
+});
+
+describe("search and curation", () => {
+    it("finds notes by full-text search, with an excerpt", async () => {
+        const text = textOf(
+            await client.callTool({ name: "search_notes", arguments: { query: "mortgage" } })
+        );
+        expect(text).toContain("projects/house.md");
+        expect(text).toMatch(/«mortgage»/i);
+    });
+
+    it("explains a malformed query instead of throwing at the caller", async () => {
+        const text = textOf(
+            await client.callTool({ name: "search_notes", arguments: { query: 'unbalanced "quote' } })
+        );
+        expect(text).toMatch(/rejected/i);
+        expect(text).toMatch(/quote/i);
+    });
+
+    it("says plainly when nothing matches", async () => {
+        const text = textOf(
+            await client.callTool({ name: "search_notes", arguments: { query: "zzzznotpresent" } })
+        );
+        expect(text).toMatch(/No notes match/);
+    });
+
+    it("inventories frontmatter properties and flags inconsistent types", async () => {
+        const text = textOf(await client.callTool({ name: "property_inventory", arguments: {} }));
+        expect(text).toContain("status");
+        expect(text).toContain("priority");
+        // priority is a number in one note and text in another, which is
+        // exactly what the inventory exists to surface.
+        expect(text).toMatch(/more than one value type/);
+    });
+
+    it("finds notes by property value", async () => {
+        const text = textOf(
+            await client.callTool({
+                name: "find_by_property",
+                arguments: { key: "status", value: "done" },
+            })
+        );
+        expect(text).toContain("projects/shed.md");
+        expect(text).not.toContain("projects/house.md");
+    });
+
+    it("inventories tags from frontmatter and inline alike", async () => {
+        const text = textOf(await client.callTool({ name: "tag_inventory", arguments: {} }));
+        expect(text).toContain("#home");
+        expect(text).toContain("#finance");
+    });
+
+    it("finds notes by tag", async () => {
+        const text = textOf(await client.callTool({ name: "find_by_tag", arguments: { tag: "home" } }));
+        expect(text).toContain("projects/house.md");
+        expect(text).toContain("projects/shed.md");
+    });
+
+    it("reports outgoing links and backlinks", async () => {
+        const outgoing = textOf(
+            await client.callTool({ name: "note_links", arguments: { path: "projects/house.md" } })
+        );
+        expect(outgoing).toContain("daily/2026-07-28.md");
+        expect(outgoing).toContain("UNRESOLVED");
+
+        const back = textOf(
+            await client.callTool({
+                name: "note_links",
+                arguments: { path: "daily/2026-07-28.md", direction: "backlinks" },
+            })
+        );
+        expect(back).toContain("projects/house.md");
+    });
+
+    it("reports broken links in the health check", async () => {
+        const text = textOf(await client.callTool({ name: "vault_health", arguments: {} }));
+        expect(text).toMatch(/Unresolved links \(\d+\)/);
+        expect(text).toContain("nowhere");
     });
 });

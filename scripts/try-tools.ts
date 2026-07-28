@@ -95,7 +95,7 @@ async function main() {
         .find((path): path is string => Boolean(path) && path.endsWith(".md"));
 
     if (firstPath) {
-        console.log(heading(`read_note — ${firstPath}`));
+        console.log(heading(`read_note: ${firstPath}`));
         show(await client.callTool({ name: "read_note", arguments: { path: firstPath } }), 25);
     } else {
         console.log(heading("read_note"));

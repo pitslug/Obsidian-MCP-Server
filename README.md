@@ -19,16 +19,17 @@ still to come.
 
 | Unit | State |
 | --- | --- |
-| Vault model | Implemented, verified against a live vault |
+| Vault model | Verified against a live vault |
 | Replicator | Implemented — pull-only, decoding at the boundary |
-| Tool layer | Three read tools: status, read, list |
+| Note parsing | Frontmatter, tags, wikilinks, headings |
+| Index | SQLite with FTS5: search, properties, tags, link graph |
+| Tool layer | Ten read tools |
 | Transport | stdio and streamable HTTP, bearer token |
 | Deployment | Dockerfile and Compose for the target stack |
-| Index | Not started — `list_notes` walks the replica |
 | Write executor | Not started, deliberately |
 | OAuth 2.0 + PKCE | Not started — bearer token in the interim |
 
-206 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
+286 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
 see below.
 
 ## Running it
