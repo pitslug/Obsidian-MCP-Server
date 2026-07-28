@@ -19,6 +19,18 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
+ * The characters, built from their code points rather than written out.
+ *
+ * If this file contained them as literals it would flag itself, which is
+ * exactly what happened the first time: the check passed while it was still
+ * untracked, then failed the moment it was committed and `git ls-files` began
+ * returning it. Naming a code point is also clearer about which character is
+ * meant, since the two are near-indistinguishable in most editors.
+ */
+const EM_DASH = String.fromCodePoint(0x2014);
+const EN_DASH = String.fromCodePoint(0x2013);
+
+/**
  * Every file git tracks, which is exactly the set this rule covers.
  *
  * Asking git rather than walking the tree keeps `node_modules`, build output
@@ -31,47 +43,39 @@ function trackedFiles(): string[] {
         .filter((path) => /\.(ts|mts|js|md|yml|yaml|json|example)$/.test(path) || !path.includes("."));
 }
 
+/** Every tracked line containing `character`, as "path:line: text". */
+function occurrences(character: string): string[] {
+    const found: string[] = [];
+
+    for (const path of trackedFiles()) {
+        let content: string;
+        try {
+            content = readFileSync(join(root, path), "utf8");
+        } catch {
+            // Unreadable or binary. Not this test's business.
+            continue;
+        }
+        if (!content.includes(character)) continue;
+
+        content.split("\n").forEach((line, i) => {
+            if (line.includes(character)) found.push(`${path}:${i + 1}: ${line.trim().slice(0, 90)}`);
+        });
+    }
+
+    return found;
+}
+
 describe("house style", () => {
     it("uses no em dashes anywhere", () => {
-        const offenders: string[] = [];
-
-        for (const path of trackedFiles()) {
-            let content: string;
-            try {
-                content = readFileSync(join(root, path), "utf8");
-            } catch {
-                continue;
-            }
-            if (!content.includes("—")) continue;
-
-            content.split("\n").forEach((line, i) => {
-                if (line.includes("—")) offenders.push(`${path}:${i + 1}: ${line.trim().slice(0, 90)}`);
-            });
-        }
-
-        expect(offenders, `Use a hyphen, parentheses, a comma or an arrow instead:\n${offenders.join("\n")}`).toEqual(
-            []
-        );
+        const offenders = occurrences(EM_DASH);
+        expect(offenders, `Use a hyphen, parentheses, a comma or an arrow:\n${offenders.join("\n")}`).toEqual([]);
     });
 
-    it("uses no en dashes in prose either", () => {
+    it("uses no en dashes either", () => {
         // Less firmly ruled on, but an en dash is the same mistake wearing a
-        // narrower hat, and it renders almost identically in the places this
-        // text ends up.
-        const offenders: string[] = [];
-
-        for (const path of trackedFiles()) {
-            let content: string;
-            try {
-                content = readFileSync(join(root, path), "utf8");
-            } catch {
-                continue;
-            }
-            content.split("\n").forEach((line, i) => {
-                if (line.includes("–")) offenders.push(`${path}:${i + 1}`);
-            });
-        }
-
-        expect(offenders).toEqual([]);
+        // narrower hat, and it is near-indistinguishable in most of the places
+        // this text ends up.
+        const offenders = occurrences(EN_DASH);
+        expect(offenders, `Use a hyphen or the word "to":\n${offenders.join("\n")}`).toEqual([]);
     });
 });

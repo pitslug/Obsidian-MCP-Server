@@ -120,9 +120,24 @@ function parseArgs(argv: string[]): Options {
     };
 }
 
+/**
+ * A reason to stop that is the operator's to fix, not a crash.
+ *
+ * Carried as an exception rather than an immediate `process.exit`, so the stack
+ * unwinds and Node ends the process itself. `process.exit` terminates while
+ * work is still in flight, which on Windows produced an abort (exit code
+ * 0xC0000409) instead of the 1 this reports, and can also truncate a piped
+ * stdout mid-write. Neither shows up on Linux, so neither was noticed here.
+ */
+class VerificationStopped extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "VerificationStopped";
+    }
+}
+
 function fail(message: string): never {
-    console.error(`\n  ${message}\n`);
-    process.exit(1);
+    throw new VerificationStopped(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -829,7 +844,8 @@ async function main() {
 
     if (failures > 0) {
         console.log(bad(`${failures} problem(s) found. Do not enable writes yet.\n`));
-        process.exit(1);
+        process.exitCode = 1;
+        return;
     }
     console.log(ok("No problems found.\n"));
 }
@@ -850,12 +866,24 @@ function isEntrypoint(): boolean {
 }
 
 if (isEntrypoint()) {
-    main().catch((error) => {
-        const message = (error as Error).message ?? String(error);
-        // An HTTP failure is an operational problem, not a crash; a stack trace
-        // buries the one line that says what went wrong.
-        const operational = /^GET /.test(message);
-        console.error(`\n  ${operational ? message : ((error as Error).stack ?? message)}\n`);
-        process.exit(1);
-    });
+    main()
+        .catch((error) => {
+            const message = (error as Error).message ?? String(error);
+            // An operational problem is not a crash, and a stack trace buries
+            // the one line that says what went wrong. A refusal raised by
+            // `fail` is always operational; so is an HTTP failure.
+            const operational = error instanceof VerificationStopped || /^GET /.test(message);
+            console.error(`\n  ${operational ? message : ((error as Error).stack ?? message)}\n`);
+            // The code is set here rather than in a `finally`, which would run
+            // on the success path too and fail every clean verification.
+            process.exitCode = 1;
+        })
+        .finally(() => {
+            // The HTTP client keeps sockets alive, so a run with nothing left
+            // to do can still sit there. This gives the normal shutdown a
+            // couple of seconds and then forces the issue. `unref` means the
+            // timer does not itself hold the process open when everything has
+            // already finished, which is the usual case.
+            setTimeout(() => process.exit(process.exitCode ?? 0), 2000).unref();
+        });
 }

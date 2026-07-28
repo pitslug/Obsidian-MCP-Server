@@ -167,8 +167,17 @@ function startServer(): Promise<void> {
 async function runScript(extra: string[] = []) {
     try {
         const { stdout, stderr } = await execFileAsync(
-            "npx",
+            // `process.execPath` with `--import tsx`, not `npx tsx`.
+            //
+            // On Windows `npx` is `npx.cmd`, a batch file, and `execFile` does
+            // not go through a shell, so the spawn fails with ENOENT before the
+            // script runs at all. Every assertion in this file then compared
+            // against an empty string, which reads as "the verifier printed
+            // nothing" rather than "the verifier never started" - 21 failures
+            // with no clue in any of them.
+            process.execPath,
             [
+                "--import",
                 "tsx",
                 scriptPath,
                 "--url",
@@ -183,8 +192,12 @@ async function runScript(extra: string[] = []) {
         );
         return { code: 0, out: stdout + stderr };
     } catch (error) {
-        const e = error as { code?: number; stdout?: string; stderr?: string };
-        return { code: e.code ?? 1, out: (e.stdout ?? "") + (e.stderr ?? "") };
+        const e = error as { code?: number; stdout?: string; stderr?: string; message?: string };
+        // The spawn failure itself goes into `out`. Without it a process that
+        // never launched is indistinguishable from one that launched and said
+        // nothing, and the assertions below cannot tell you which.
+        const output = (e.stdout ?? "") + (e.stderr ?? "");
+        return { code: e.code ?? 1, out: output || `[the verifier did not run: ${e.message ?? error}]` };
     }
 }
 
