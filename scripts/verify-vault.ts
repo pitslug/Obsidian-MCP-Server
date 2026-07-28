@@ -22,7 +22,7 @@
  *   npx tsx scripts/verify-vault.ts \
  *     --url https://user:password@couchdb.example.net \
  *     --db obsidiandb \
- *     [--sample 25 | --all] \
+ *     [--sample 25 | --all | --census] \
  *     [--passphrase '...'] \
  *     [--capture fixtures.json]
  *
@@ -72,6 +72,7 @@ interface Options {
     capture: string | undefined;
     verbose: boolean;
     all: boolean;
+    census: boolean;
 }
 
 function parseArgs(argv: string[]): Options {
@@ -111,6 +112,7 @@ function parseArgs(argv: string[]): Options {
         capture: get("capture"),
         verbose: argv.includes("--verbose"),
         all: argv.includes("--all"),
+        census: argv.includes("--census"),
     };
 }
 
@@ -206,6 +208,30 @@ class ReadOnlyClient {
         });
     }
 
+    /** IDs only, for ranges where the body is not needed. */
+    allDocIds(startkey: string, endkey: string, limit: number) {
+        return this.get<{ rows: { id: string }[] }>("/_all_docs", {
+            startkey: JSON.stringify(startkey),
+            endkey: JSON.stringify(endkey),
+            limit: String(limit),
+        });
+    }
+
+    /** {@link walk}, without fetching document bodies. */
+    async *walkIds(startkey: string, endkey: string, pageSize = 2000) {
+        let from = startkey;
+        for (;;) {
+            const page = await this.allDocIds(from, endkey, pageSize + 1);
+            const rows = page?.rows ?? [];
+            if (rows.length === 0) return;
+
+            const hasMore = rows.length > pageSize;
+            for (const row of hasMore ? rows.slice(0, pageSize) : rows) yield row.id;
+            if (!hasMore) return;
+            from = rows[pageSize]?.id as string;
+        }
+    }
+
     /**
      * Every document in an ID range, a page at a time.
      *
@@ -255,6 +281,137 @@ const bad = (s: string) => `  [31m✗[0m ${s}`;
 const warn = (s: string) => `  [33m![0m ${s}`;
 const info = (s: string) => `    ${s}`;
 const heading = (s: string) => `\n[1m${s}[0m`;
+
+// ---------------------------------------------------------------------------
+// Census
+// ---------------------------------------------------------------------------
+
+/** The ID ranges the file enumeration walks, excluding `_*` and `h:*`. */
+const FILE_RANGES: [string, string][] = [
+    ["", "_"],
+    ["_\u{10ffff}", PREFIX_CHUNK],
+    [CHUNK_ID_RANGE_END, "\u{10ffff}"],
+];
+
+function inFileRanges(id: string): boolean {
+    return FILE_RANGES.some(([start, end]) => id >= start && id <= end);
+}
+
+/**
+ * Account for every document in the database.
+ *
+ * Written because a full verification run reported 25 live files in a database
+ * of 1,403 documents, which is either the truth or a hole in the enumeration —
+ * and "probably orphaned chunks" is not something to build a replicator on top
+ * of. This walks the whole ID space and says where every document went.
+ *
+ * Chunk bodies are never fetched; a chunk is identified by its ID prefix, and
+ * pulling them would mean downloading the entire vault to count it.
+ */
+async function census(client: ReadOnlyClient) {
+    console.log(heading("Census — every document, by type"));
+
+    const byType = new Map<string, number>();
+    const filePrefixes = new Map<string, number>();
+    const referenced = new Set<string>();
+    let liveFiles = 0;
+    let deletedFiles = 0;
+    let outsideRanges = 0;
+    const outsideExamples: string[] = [];
+    let total = 0;
+
+    // Everything except the chunk range, with bodies.
+    for (const [start, end] of [
+        ["", PREFIX_CHUNK],
+        [CHUNK_ID_RANGE_END, "\u{10ffff}"],
+    ] as [string, string][]) {
+        for await (const row of client.walk(start, end)) {
+            total++;
+            const doc = row.doc as Record<string, unknown> | undefined;
+            if (!doc) continue;
+
+            const type = typeof doc.type === "string" ? doc.type : "(no type)";
+            byType.set(type, (byType.get(type) ?? 0) + 1);
+
+            if (isFileEntry(doc)) {
+                const deleted = isDeleted(doc as { deleted?: boolean; _deleted?: boolean });
+                if (deleted) deletedFiles++;
+                else liveFiles++;
+
+                const prefix = /^(ix:|i:|ps:|f:)/.exec(row.id)?.[1] ?? "(none)";
+                filePrefixes.set(prefix, (filePrefixes.get(prefix) ?? 0) + 1);
+
+                for (const child of (doc.children as string[] | undefined) ?? []) referenced.add(child);
+
+                // The check this whole mode exists for.
+                if (!inFileRanges(row.id)) {
+                    outsideRanges++;
+                    if (outsideExamples.length < 5) outsideExamples.push(row.id);
+                }
+            }
+        }
+    }
+
+    // The chunk range, by ID alone.
+    let chunks = 0;
+    for await (const _id of client.walkIds(PREFIX_CHUNK, CHUNK_ID_RANGE_END)) {
+        chunks++;
+        total++;
+    }
+
+    for (const [type, count] of [...byType.entries()].sort((a, b) => b[1] - a[1])) {
+        console.log(info(`${String(count).padStart(6)}  ${type}`));
+    }
+    console.log(info(`${String(chunks).padStart(6)}  leaf (chunk documents, counted by ID)`));
+    console.log(info(`${String(total).padStart(6)}  total`));
+
+    console.log(heading("Files"));
+    console.log(info(`${liveFiles} live, ${deletedFiles} deleted`));
+    for (const [prefix, count] of [...filePrefixes.entries()].sort((a, b) => b[1] - a[1])) {
+        const label =
+            prefix === "i:"
+                ? "hidden file sync (.obsidian/…)"
+                : prefix === "ix:"
+                  ? "customisation sync"
+                  : prefix === "ps:"
+                    ? "plugin store (obsolete)"
+                    : prefix === "f:"
+                      ? "obfuscated"
+                      : "vault notes and attachments";
+        console.log(info(`${String(count).padStart(6)}  ${prefix.padEnd(7)} ${label}`));
+    }
+
+    console.log(heading("Chunks"));
+    const orphans = chunks - referenced.size;
+    console.log(info(`${referenced.size} referenced by a file document (live or deleted)`));
+    console.log(
+        info(
+            `${orphans} not referenced by any file document` +
+                (orphans > 0
+                    ? ` — ${((orphans / Math.max(1, chunks)) * 100).toFixed(0)}% of the chunk store`
+                    : "")
+        )
+    );
+    if (orphans > chunks * 0.5) {
+        console.log(
+            info(
+                "That is normal for LiveSync: chunks from deleted notes and superseded\n" +
+                    "    revisions are not collected until a compaction is run."
+            )
+        );
+    }
+
+    console.log(heading("Enumeration coverage"));
+    if (outsideRanges === 0) {
+        console.log(ok("Every file document falls inside the ranges the verifier walks."));
+    } else {
+        console.log(bad(`${outsideRanges} file document(s) fall OUTSIDE the ranges the verifier walks.`));
+        console.log(info(`e.g. ${outsideExamples.join(", ")}`));
+        console.log(info("The verifier has been under-reporting. This is a bug — report it."));
+        process.exitCode = 1;
+    }
+    console.log("");
+}
 
 // ---------------------------------------------------------------------------
 // Main
@@ -359,6 +516,13 @@ async function main() {
 
     const ctx = transformContextFor(settings, salt);
 
+    // --- Census ------------------------------------------------------------
+
+    if (options.census) {
+        await census(client);
+        return;
+    }
+
     // --- Choose which files to verify --------------------------------------
 
     console.log(
@@ -367,18 +531,10 @@ async function main() {
         )
     );
 
-    // File documents live outside the `_*` and `h:*` ranges. Mirrors how the
-    // plugin enumerates them.
-    const ranges: [string, string][] = [
-        ["", "_"],
-        ["_\u{10ffff}", PREFIX_CHUNK],
-        [CHUNK_ID_RANGE_END, "\u{10ffff}"],
-    ];
-
     const all: FileEntry[] = [];
     let deleted = 0;
     let nonFile = 0;
-    for (const [start, end] of ranges) {
+    for (const [start, end] of FILE_RANGES) {
         for await (const row of client.walk(start, end)) {
             const doc = row.doc as Record<string, unknown> | undefined;
             if (!doc) continue;

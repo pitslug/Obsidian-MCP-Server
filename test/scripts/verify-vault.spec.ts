@@ -295,6 +295,48 @@ describe("sampling", () => {
     }, 300_000);
 });
 
+describe("census", () => {
+    it("accounts for every document, and confirms the file ranges miss nothing", async () => {
+        docs = await buildVault({ encrypt: false }, { extraNotes: 20, binaries: 3 });
+        const result = await runScript(["--census"]);
+
+        expect(result.out).toContain("Census — every document, by type");
+        expect(result.out).toMatch(/leaf \(chunk documents, counted by ID\)/);
+        expect(result.out).toContain("Every file document falls inside the ranges the verifier walks.");
+        expect(result.out).toMatch(/\d+ live, \d+ deleted/);
+        expect(result.code).toBe(0);
+    }, 300_000);
+
+    it("separates referenced chunks from orphans", async () => {
+        docs = await buildVault({ encrypt: false }, { extraNotes: 5 });
+        // An orphan, as a deleted note or a superseded revision leaves behind.
+        docs.set("h:orphanchunk", { _id: "h:orphanchunk", type: "leaf", data: "x", _rev: "1-x" });
+
+        const result = await runScript(["--census"]);
+        expect(result.out).toMatch(/\d+ referenced by a file document/);
+        expect(result.out).toMatch(/[1-9]\d* not referenced by any file document/);
+    }, 300_000);
+
+    it("counts hidden-file and customisation-sync documents separately from notes", async () => {
+        docs = await buildVault({ encrypt: false });
+        // `i:` documents are real files the plugin syncs, but they are not
+        // vault notes; a census that lumps them together overstates the vault.
+        docs.set("i:.obsidian/app.json", {
+            _id: "i:.obsidian/app.json",
+            path: "i:.obsidian/app.json",
+            type: "plain",
+            children: [],
+            ctime: 1,
+            mtime: 1,
+            size: 0,
+        });
+
+        const result = await runScript(["--census"]);
+        expect(result.out).toMatch(/i:\s+hidden file sync/);
+        expect(result.code).toBe(0);
+    }, 300_000);
+});
+
 describe("document ID encoding", () => {
     it("keeps the slash in _local and _design, encodes it everywhere else", () => {
         // Regression: encoding the whole ID gave `_local%2F…`, which CouchDB

@@ -18,7 +18,7 @@ tested. Nothing talks to a real database yet.
 
 | Unit | State |
 | --- | --- |
-| Vault model | Implemented, 170 tests |
+| Vault model | Implemented, 173 tests |
 | Replicator | Not started |
 | Index | Not started |
 | Write executor | Not started |
@@ -116,6 +116,12 @@ not assumed), flags any setting two devices disagree on, assembles a sample of
 notes, and then does the check that matters: re-chunks each note and compares
 the chunk IDs it *would* write against the ones the plugin actually wrote. If
 those match, the write path deduplicates exactly as another device does.
+
+`--census` walks the entire ID space instead and reports where every document
+went: counts by type, live versus deleted files, notes versus hidden-file sync,
+and how much of the chunk store is orphaned. Most documents in a LiveSync
+database are chunks, not notes, so `doc_count` is a poor proxy for vault size —
+the census is what tells you the difference.
 
 Useful flags: `--all` to verify every file in the vault rather than a sample,
 `--sample N`, `--passphrase` for an encrypted vault, `--verbose` for per-file
