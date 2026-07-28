@@ -135,6 +135,7 @@ describe("the tool surface", () => {
         expect(names).toEqual([
             "find_by_property",
             "find_by_tag",
+            "get_attachment",
             "list_notes",
             "note_links",
             "property_inventory",
@@ -216,12 +217,12 @@ describe("read_note", () => {
         expect(text).toContain("list_notes");
     });
 
-    it("refuses a binary file rather than returning mojibake", async () => {
+    it("points at get_attachment rather than returning mojibake", async () => {
         const text = textOf(
             await client.callTool({ name: "read_note", arguments: { path: "attachments/image.png" } })
         );
-        expect(text).toMatch(/binary file/);
-        expect(text).toMatch(/not implemented yet/);
+        expect(text).toMatch(/attachment/);
+        expect(text).toMatch(/get_attachment/);
     });
 
     it("rejects arguments that do not match the schema", async () => {
@@ -307,5 +308,35 @@ describe("search and curation", () => {
         const text = textOf(await client.callTool({ name: "vault_health", arguments: {} }));
         expect(text).toMatch(/Unresolved links \(\d+\)/);
         expect(text).toContain("nowhere");
+    });
+});
+
+describe("get_attachment", () => {
+    it("returns an image as an image, for looking at", async () => {
+        const result = (await client.callTool({
+            name: "get_attachment",
+            arguments: { path: "attachments/image.png" },
+        })) as { content: { type: string; mimeType?: string }[] };
+
+        const image = result.content.find((part) => part.type === "image");
+        expect(image).toBeTruthy();
+        expect(image?.mimeType).toBe("image/png");
+    });
+
+    it("redirects a text note to read_note", async () => {
+        const text = textOf(
+            await client.callTool({
+                name: "get_attachment",
+                arguments: { path: "daily/2026-07-28.md" },
+            })
+        );
+        expect(text).toMatch(/read_note/);
+    });
+
+    it("explains a missing attachment", async () => {
+        const text = textOf(
+            await client.callTool({ name: "get_attachment", arguments: { path: "nope.pdf" } })
+        );
+        expect(text).toMatch(/No note at "nope.pdf"/);
     });
 });

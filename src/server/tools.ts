@@ -18,6 +18,7 @@ import type { VaultReader } from "../vault/reader.js";
 import type { VaultIndex } from "../index/index.js";
 import type { VaultFormatSettings } from "../vault-model/index.js";
 import { NoteNotFoundError } from "../vault/reader.js";
+import { extractAttachment, isImage, mimeTypeFor } from "../attachment/extract.js";
 
 export interface ToolContext {
     replicator: Replicator;
@@ -90,8 +91,8 @@ export function registerTools(server: FastMCP, ctx: ToolContext): void {
 
                 if (file.kind === "binary") {
                     return (
-                        `"${file.path}" is a binary file (${formatBytes(file.size)}), not a text note. ` +
-                        `Attachment retrieval is not implemented yet.`
+                        `"${file.path}" is an attachment (${formatBytes(file.size)}), not a text note. ` +
+                        `Use get_attachment to read it.`
                     );
                 }
 
@@ -161,4 +162,87 @@ function formatBytes(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/** Attachment retrieval, registered alongside the read tools. */
+export function registerAttachmentTool(server: FastMCP, ctx: ToolContext): void {
+    server.addTool({
+        name: "get_attachment",
+        description:
+            "Retrieve an attachment from the vault by path. PDFs are returned as extracted text. " +
+            "Images are returned so they can be looked at directly. Use this after list_notes or " +
+            "search_notes has shown you a non-markdown file.",
+        parameters: z.object({
+            path: z.string().min(1).describe("Vault-relative path of the attachment."),
+            max_characters: z
+                .number()
+                .int()
+                .positive()
+                .max(200_000)
+                .optional()
+                .describe("Truncate extracted text to this length."),
+        }),
+        execute: async ({ path, max_characters }) => {
+            let file;
+            try {
+                file = (await ctx.reader.read(path)).file;
+            } catch (error) {
+                if (error instanceof NoteNotFoundError) {
+                    return `${error.message} Use list_notes to see what exists.`;
+                }
+                throw error;
+            }
+
+            if (file.kind === "text") {
+                return `"${file.path}" is a text note, not an attachment. Use read_note.`;
+            }
+
+            const bytes = file.bytes ?? new Uint8Array();
+            if (bytes.length > ctx.attachmentSizeCap) {
+                // Refused with its size reported, rather than reassembled into
+                // memory and then discarded.
+                return (
+                    `"${file.path}" is ${formatBytes(bytes.length)}, above the ` +
+                    `${formatBytes(ctx.attachmentSizeCap)} limit for retrieval.`
+                );
+            }
+
+            if (isImage(file.path)) {
+                return {
+                    content: [
+                        { type: "text" as const, text: `${file.path} (${formatBytes(bytes.length)})` },
+                        {
+                            type: "image" as const,
+                            data: Buffer.from(bytes).toString("base64"),
+                            mimeType: mimeTypeFor(file.path),
+                        },
+                    ],
+                };
+            }
+
+            const extracted = await extractAttachment(file.path, bytes);
+
+            if (extracted.outcome !== "extracted") {
+                return (
+                    `No text could be read from "${file.path}" (${formatBytes(bytes.length)}).\n\n` +
+                    `${extracted.reason ?? "Unknown reason."}`
+                );
+            }
+
+            const limit = max_characters ?? 50_000;
+            const truncated = extracted.text.length > limit;
+            const body = truncated ? extracted.text.slice(0, limit) : extracted.text;
+
+            const header = [
+                `Path: ${file.path}`,
+                `Pages: ${extracted.pages}`,
+                `Size: ${formatBytes(bytes.length)}`,
+                truncated ? `Showing the first ${limit} of ${extracted.text.length} characters.` : "",
+            ]
+                .filter(Boolean)
+                .join("\n");
+
+            return `${header}\n\n---\n\n${body}`;
+        },
+    });
 }

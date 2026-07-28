@@ -24,7 +24,8 @@
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
     "verify": "tsx scripts/verify-vault.ts",
-    "try": "tsx scripts/try-tools.ts"
+    "try": "tsx scripts/try-tools.ts",
+    "attachments": "tsx scripts/verify-vault.ts --attachments"
   },
   "keywords": [
     "obsidian",
@@ -44,6 +45,7 @@
     "pouchdb-mapreduce": "^9.0.0",
     "pouchdb-replication": "^9.0.0",
     "transform-pouch": "^2.0.0",
+    "unpdf": "^1.8.0",
     "xxhash-wasm": "1.0.2",
     "yaml": "^2.9.0",
     "zod": "^3.25.76"

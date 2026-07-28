@@ -52,6 +52,13 @@ export interface LinkRow {
     embed: boolean;
 }
 
+/** Text pulled out of an attachment, for indexing alongside notes. */
+export interface AttachmentText {
+    outcome: string;
+    text: string;
+    reason: string | undefined;
+}
+
 export interface SearchOptions {
     query: string;
     folder?: string;
@@ -88,13 +95,16 @@ export class VaultIndex {
     private prepare(): void {
         this.statements = {
             upsertNote: this.db.prepare(
-                `INSERT INTO notes (path, doc_id, rev, kind, size, ctime, mtime, chunk_count, frontmatter_error)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `INSERT INTO notes (path, doc_id, rev, kind, size, ctime, mtime, chunk_count,
+                                    frontmatter_error, extraction, extraction_reason)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(path) DO UPDATE SET
                    doc_id = excluded.doc_id, rev = excluded.rev, kind = excluded.kind,
                    size = excluded.size, ctime = excluded.ctime, mtime = excluded.mtime,
                    chunk_count = excluded.chunk_count,
-                   frontmatter_error = excluded.frontmatter_error`
+                   frontmatter_error = excluded.frontmatter_error,
+                   extraction = excluded.extraction,
+                   extraction_reason = excluded.extraction_reason`
             ),
             deleteNote: this.db.prepare(`DELETE FROM notes WHERE path = ?`),
             deleteFts: this.db.prepare(`DELETE FROM notes_fts WHERE path = ?`),
@@ -138,7 +148,7 @@ export class VaultIndex {
      * frontmatter, no links. They still belong in the index so that listings
      * and link resolution can see them.
      */
-    put(file: AssembledFile): void {
+    put(file: AssembledFile, attachment?: AttachmentText): void {
         this.db.exec("BEGIN");
         try {
             this.statements.upsertNote?.run(
@@ -150,7 +160,9 @@ export class VaultIndex {
                 file.ctime,
                 file.mtime,
                 file.children.length,
-                null
+                null,
+                attachment?.outcome ?? null,
+                attachment?.reason ?? null
             );
             this.statements.deleteFts?.run(file.path);
             this.statements.deleteProperties?.run(file.path);
@@ -158,6 +170,12 @@ export class VaultIndex {
             this.statements.deleteLinks?.run(file.path);
 
             if (file.kind === "text") this.indexText(file);
+            // Extracted attachment text goes into the same full-text table, so
+            // one search covers notes and attachments alike.
+            else if (attachment?.text) {
+                const title = (file.path.split("/").pop() ?? file.path).replace(/\.[^.]+$/, "");
+                this.statements.insertFts?.run(file.path, title, attachment.text);
+            }
 
             this.db.exec("COMMIT");
         } catch (error) {
@@ -179,7 +197,9 @@ export class VaultIndex {
                 file.ctime,
                 file.mtime,
                 file.children.length,
-                parsed.frontmatterError
+                parsed.frontmatterError,
+                null,
+                null
             );
         }
 
@@ -463,6 +483,21 @@ export class VaultIndex {
                  ORDER BY source_path LIMIT ?`
             )
             .all(limit) as unknown as { source: string; target: string }[];
+    }
+
+    /** Attachments and what came of trying to extract their text. */
+    extractionReport(): { path: string; outcome: string; reason: string | undefined }[] {
+        const rows = this.db
+            .prepare(
+                `SELECT path, extraction AS outcome, extraction_reason AS reason
+                 FROM notes WHERE kind = 'binary' ORDER BY path`
+            )
+            .all() as unknown as { path: string; outcome: string | null; reason: string | null }[];
+        return rows.map((row) => ({
+            path: row.path,
+            outcome: row.outcome ?? "not attempted",
+            reason: row.reason ?? undefined,
+        }));
     }
 
     /** Notes whose frontmatter could not be parsed. */

@@ -22,7 +22,7 @@ import {
 } from "../vault-model/index.js";
 import { Replicator } from "../replicator/index.js";
 import { VaultReader } from "../vault/reader.js";
-import { registerTools } from "./tools.js";
+import { registerAttachmentTool, registerTools } from "./tools.js";
 import { registerSearchTools } from "./search-tools.js";
 import { VaultIndex } from "../index/index.js";
 import { IndexBuilder } from "../index/builder.js";
@@ -175,7 +175,9 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     // nothing but the rebuild.
     const index = new VaultIndex(config.indexPath);
     index.open();
-    const builder = new IndexBuilder(replicator, reader, index, log);
+    const builder = new IndexBuilder(replicator, reader, index, log, {
+        extractionSizeCap: config.attachmentSizeCap,
+    });
     await builder.rebuild();
     builder.follow();
 
@@ -213,14 +215,16 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         health: { enabled: true, path: "/health", message: "ok", status: 200 },
     });
 
-    registerTools(server, {
+    const toolContext = {
         replicator,
         reader,
         index,
         settings,
         readOnly: config.readOnly,
         attachmentSizeCap: config.attachmentSizeCap,
-    });
+    };
+    registerTools(server, toolContext);
+    registerAttachmentTool(server, toolContext);
     registerSearchTools(server, { index });
 
     if (config.transport.kind === "stdio") {

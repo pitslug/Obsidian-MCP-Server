@@ -23,13 +23,14 @@ still to come.
 | Replicator | Implemented — pull-only, decoding at the boundary |
 | Note parsing | Frontmatter, tags, wikilinks, headings |
 | Index | SQLite with FTS5: search, properties, tags, link graph |
-| Tool layer | Ten read tools |
+| Attachments | PDF text extraction, indexed and retrievable |
+| Tool layer | Eleven read tools |
 | Transport | stdio and streamable HTTP, bearer token |
 | Deployment | Dockerfile and Compose for the target stack |
 | Write executor | Not started, deliberately |
 | OAuth 2.0 + PKCE | Not started — bearer token in the interim |
 
-289 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
+303 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
 see below.
 
 ## Running it
@@ -156,6 +157,12 @@ not assumed), flags any setting two devices disagree on, assembles a sample of
 notes, and then does the check that matters: re-chunks each note and compares
 the chunk IDs it *would* write against the ones the plugin actually wrote. If
 those match, the write path deduplicates exactly as another device does.
+
+`--attachments` reports, per attachment, whether its text can be extracted at
+all. That is the question that decides whether attachment search is worth
+anything for a given vault: a PDF of handwriting is searchable only if
+something already put a text layer into it. OneNote's handwriting recognition
+does; a scanner without OCR does not. Run it before assuming either way.
 
 `--census` walks the entire ID space instead and reports where every document
 went: counts by type, live versus deleted files, notes versus hidden-file sync,

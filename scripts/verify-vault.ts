@@ -22,7 +22,7 @@
  *   npx tsx scripts/verify-vault.ts \
  *     --url https://user:password@couchdb.example.net \
  *     --db obsidiandb \
- *     [--sample 25 | --all | --census] \
+ *     [--sample 25 | --all | --census | --attachments] \
  *     [--passphrase '...'] \
  *     [--capture fixtures.json]
  *
@@ -34,6 +34,7 @@
 import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { resolve as resolvePath } from "node:path";
+import { extractAttachment, isImage, isPdf } from "../src/attachment/extract.js";
 import {
     assembleFile,
     ChunkHasher,
@@ -57,6 +58,7 @@ import {
     type ChunkedEntry,
     type FileEntry,
     type MilestoneEntry,
+    type TransformContext,
     type VaultFormatSettings,
 } from "../src/vault-model/index.js";
 
@@ -73,6 +75,7 @@ interface Options {
     verbose: boolean;
     all: boolean;
     census: boolean;
+    attachments: boolean;
 }
 
 function parseArgs(argv: string[]): Options {
@@ -113,6 +116,7 @@ function parseArgs(argv: string[]): Options {
         verbose: argv.includes("--verbose"),
         all: argv.includes("--all"),
         census: argv.includes("--census"),
+        attachments: argv.includes("--attachments"),
     };
 }
 
@@ -281,6 +285,103 @@ const bad = (s: string) => `  [31m✗[0m ${s}`;
 const warn = (s: string) => `  [33m![0m ${s}`;
 const info = (s: string) => `    ${s}`;
 const heading = (s: string) => `\n[1m${s}[0m`;
+
+// ---------------------------------------------------------------------------
+// Attachments
+// ---------------------------------------------------------------------------
+
+/**
+ * Report whether each attachment has text that can be extracted.
+ *
+ * The question this answers is the one that decides whether attachment search
+ * is worth anything for a given vault: a PDF of handwriting is searchable only
+ * if something already put a text layer in it. OneNote's handwriting
+ * recognition does; a scanner without OCR does not. Guessing either way would
+ * be building on an assumption, so this measures it.
+ */
+async function reportAttachments(client: ReadOnlyClient, ctx: TransformContext) {
+    console.log(heading("Attachments: can their text be extracted?"));
+
+    const attachments: FileEntry[] = [];
+    for (const [start, end] of FILE_RANGES) {
+        for await (const row of client.walk(start, end)) {
+            const doc = row.doc as Record<string, unknown> | undefined;
+            if (!doc || !isFileEntry(doc)) continue;
+            if (isDeleted(doc as { deleted?: boolean; _deleted?: boolean })) continue;
+            if (doc.type !== "newnote") continue;
+            attachments.push(doc as unknown as FileEntry);
+        }
+    }
+
+    if (attachments.length === 0) {
+        console.log(info("No attachments in this vault."));
+        return;
+    }
+
+    const tally = { extracted: 0, "no-text-layer": 0, "not-textual": 0, failed: 0 } as Record<string, number>;
+
+    for (const raw of attachments) {
+        const entry = await decodeDocument(raw, ctx);
+        const path = String((entry as { path?: string }).path ?? entry._id);
+        const children = isLegacyNote(entry) ? [] : (entry as ChunkedEntry).children;
+
+        try {
+            const chunkDocs = await client.byKeys(children);
+            const chunks = new Map<string, ChunkEntry>();
+            for (const [id, doc] of chunkDocs) {
+                chunks.set(id, (await decodeDocument(doc as never, ctx)) as unknown as ChunkEntry);
+            }
+            const file = assembleFile(entry, chunks);
+
+            if (isImage(path)) {
+                tally["not-textual"] = (tally["not-textual"] ?? 0) + 1;
+                console.log(info(`${path}\n      image, nothing to extract`));
+                continue;
+            }
+            if (!isPdf(path)) {
+                tally["not-textual"] = (tally["not-textual"] ?? 0) + 1;
+                console.log(info(`${path}\n      no extractor for this file type`));
+                continue;
+            }
+
+            const result = await extractAttachment(path, file.bytes ?? new Uint8Array());
+            tally[result.outcome] = (tally[result.outcome] ?? 0) + 1;
+
+            const label =
+                result.outcome === "extracted"
+                    ? `${result.pages} page(s), ${result.text.length} chars (${Math.round(result.charsPerPage)}/page)`
+                    : (result.reason ?? result.outcome);
+            const marker = result.outcome === "extracted" ? ok : warn;
+            console.log(marker(`${path}`));
+            console.log(info(`    ${label}`));
+            if (result.outcome === "extracted") {
+                const preview = result.text.replace(/\s+/g, " ").slice(0, 120);
+                console.log(info(`    "${preview}${result.text.length > 120 ? "…" : ""}"`));
+            }
+        } catch (error) {
+            tally.failed = (tally.failed ?? 0) + 1;
+            console.log(bad(`${path}: ${(error as Error).message}`));
+        }
+    }
+
+    console.log(heading("Summary"));
+    console.log(info(`${tally.extracted ?? 0} with a usable text layer (searchable)`));
+    console.log(info(`${tally["no-text-layer"] ?? 0} with no text layer (would need OCR)`));
+    console.log(info(`${tally["not-textual"] ?? 0} with nothing to extract (images, other types)`));
+    if (tally.failed) console.log(info(`${tally.failed} could not be read`));
+
+    if ((tally["no-text-layer"] ?? 0) > 0) {
+        console.log("");
+        console.log(
+            info(
+                "Files with no text layer are pictures of words. Making them searchable\n" +
+                    "    means OCR, which is a separate decision: it is slow, imperfect on\n" +
+                    "    handwriting, and its output would need to be treated as approximate."
+            )
+        );
+    }
+    console.log("");
+}
 
 // ---------------------------------------------------------------------------
 // Census
@@ -515,6 +616,13 @@ async function main() {
     }
 
     const ctx = transformContextFor(settings, salt);
+
+    // --- Attachments ---------------------------------------------------------
+
+    if (options.attachments) {
+        await reportAttachments(client, ctx);
+        return;
+    }
 
     // --- Census ------------------------------------------------------------
 

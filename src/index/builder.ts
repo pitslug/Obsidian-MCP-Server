@@ -17,6 +17,7 @@ import type { VaultIndex } from "./index.js";
 import type { Logger } from "../server/logger.js";
 import { entryPath, isDeleted, isFileEntry } from "../vault-model/index.js";
 import { CHUNK_ID_RANGE_END, PREFIX_CHUNK } from "../vault-model/constants.js";
+import { extractAttachment } from "../attachment/extract.js";
 
 const FILE_RANGES: [string, string][] = [
     ["", "_"],
@@ -32,6 +33,11 @@ export interface BuildResult {
     ms: number;
 }
 
+export interface IndexBuilderOptions {
+    /** Skip extraction for attachments larger than this. */
+    extractionSizeCap: number;
+}
+
 export class IndexBuilder {
     private following = false;
     private changes: { cancel(): void } | undefined;
@@ -42,8 +48,41 @@ export class IndexBuilder {
         private readonly replicator: Replicator,
         private readonly reader: VaultReader,
         private readonly index: VaultIndex,
-        private readonly log: Logger
+        private readonly log: Logger,
+        private readonly options: IndexBuilderOptions = { extractionSizeCap: 25 * 1024 * 1024 }
     ) {}
+
+    /**
+     * Index one file, extracting attachment text where there is any.
+     *
+     * Extraction is skipped above a size cap: a very large PDF costs real time
+     * and memory to parse, and a rebuild that stalls on one file is worse than
+     * a file that is listed but not searchable.
+     */
+    private async indexOne(path: string): Promise<void> {
+        const { file } = await this.reader.read(path);
+
+        if (file.kind !== "binary") {
+            this.index.put(file);
+            return;
+        }
+
+        if (file.size > this.options.extractionSizeCap) {
+            this.index.put(file, {
+                outcome: "skipped",
+                text: "",
+                reason: `Larger than the ${Math.round(this.options.extractionSizeCap / (1024 * 1024))} MiB extraction cap.`,
+            });
+            return;
+        }
+
+        const extracted = await extractAttachment(path, file.bytes ?? new Uint8Array());
+        this.index.put(file, {
+            outcome: extracted.outcome,
+            text: extracted.text,
+            reason: extracted.reason,
+        });
+    }
 
     /** Walk every file document and index it. */
     async rebuild(): Promise<BuildResult> {
@@ -68,8 +107,7 @@ export class IndexBuilder {
                 const path = String(entryPath(doc as never));
                 live.add(path);
                 try {
-                    const { file } = await this.reader.read(path);
-                    this.index.put(file);
+                    await this.indexOne(path);
                     indexed++;
                 } catch (error) {
                     skipped++;
@@ -137,8 +175,7 @@ export class IndexBuilder {
         }
 
         try {
-            const { file } = await this.reader.read(path);
-            this.index.put(file);
+            await this.indexOne(path);
             // Cheap at this vault's size, and it keeps backlinks correct when a
             // note that was previously a broken link target appears.
             this.index.resolveLinks();

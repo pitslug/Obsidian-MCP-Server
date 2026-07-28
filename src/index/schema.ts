@@ -10,7 +10,7 @@
  * Migrations would be a liability for a cache.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS notes (
     ctime         INTEGER NOT NULL,
     mtime         INTEGER NOT NULL,
     chunk_count   INTEGER NOT NULL DEFAULT 0,
+    -- For attachments: whether text could be extracted, and why not.
+    -- 'extracted' | 'no-text-layer' | 'not-textual' | 'failed' | NULL for notes.
+    extraction        TEXT,
+    extraction_reason TEXT,
     -- Set when frontmatter was present but unparseable. Surfaced rather than
     -- swallowed: it is the author's problem to fix, but only if they see it.
     frontmatter_error TEXT
