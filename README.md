@@ -13,20 +13,49 @@ See [`docs/design.md`](docs/design.md) for the full design.
 
 ## Status
 
-**In progress.** The vault model — the LiveSync semantics layer — is built and
-tested. Nothing talks to a real database yet.
+**In progress.** A read-only vertical slice runs end to end: it replicates a
+real vault and serves it over MCP. Search, attachments and every write path are
+still to come.
 
 | Unit | State |
 | --- | --- |
-| Vault model | Implemented, 173 tests |
-| Replicator | Not started |
-| Index | Not started |
-| Write executor | Not started |
-| Tool layer | Not started |
-| Transport and auth | Not started |
+| Vault model | Implemented, verified against a live vault |
+| Replicator | Implemented — pull-only, decoding at the boundary |
+| Tool layer | Three read tools: status, read, list |
+| Transport | stdio and streamable HTTP, bearer token |
+| Deployment | Dockerfile and Compose for the target stack |
+| Index | Not started — `list_notes` walks the replica |
+| Write executor | Not started, deliberately |
+| OAuth 2.0 + PKCE | Not started — bearer token in the interim |
 
-A read-only verifier (`scripts/verify-vault.ts`) can already be pointed at a
-real vault; see below.
+194 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
+see below.
+
+## Running it
+
+```bash
+npm install && npm run build
+
+COUCHDB_URL='https://user:password@couchdb.example.net/?db=obsidiandb' \
+MCP_TRANSPORT=stdio \
+REPLICA_PATH=./tmp/replica \
+node dist/index.js
+```
+
+It reads the vault's storage settings from the vault itself, replicates the
+whole database locally, waits for that first pass, then serves. `deploy/`
+holds a Dockerfile and a Compose file for a Traefik-fronted stack.
+
+Configuration is environment variables throughout. Every sensitive value also
+accepts a `NAME_FILE` form naming a file to read it from, which is how Docker
+secrets are consumed. `deploy/obsidian-mcp.env.example` lists all of them.
+
+### Why writes are absent rather than disabled
+
+`READ_ONLY` defaults to true, but more to the point the write tools are not
+registered at all. A tool that exists and reports "not implemented" is worse
+than no tool: a model will call it, and the user will conclude that writing is
+one setting away.
 
 ## Why the vault model came first
 

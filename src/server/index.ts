@@ -1,0 +1,231 @@
+/**
+ * Wiring: configuration in, running server out.
+ *
+ * Startup order matters and is deliberate. The vault's own format settings are
+ * read from CouchDB *before* replication begins, because they determine how
+ * every document is decoded — starting replication first would mean decoding
+ * the first batch under assumed settings.
+ */
+
+import { FastMCP } from "fastmcp";
+import {
+    readTweakValues,
+    resolveSettings,
+    decodePbkdf2Salt,
+    transformContextFor,
+    DOCID_MILESTONE,
+    DOCID_SYNC_PARAMETERS,
+    DOCID_VERSIONING,
+    SUPPORTED_DB_VERSION,
+    type MilestoneEntry,
+    type VaultFormatSettings,
+} from "../vault-model/index.js";
+import { Replicator } from "../replicator/index.js";
+import { VaultReader } from "../vault/reader.js";
+import { registerTools } from "./tools.js";
+import { loadConfig, redactedUrl, remoteUrl, type Config } from "../config.js";
+import { createLogger, type Logger } from "./logger.js";
+import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
+
+/** Constant-time string comparison, tolerant of unequal lengths. */
+function timingSafeEqual(a: string, b: string): boolean {
+    const left = new Uint8Array(Buffer.from(a));
+    const right = new Uint8Array(Buffer.from(b));
+    if (left.length !== right.length) {
+        // Still do the work, so the reject path costs the same either way.
+        nodeTimingSafeEqual(left, left);
+        return false;
+    }
+    return nodeTimingSafeEqual(left, right);
+}
+
+/**
+ * Read documents straight from CouchDB.
+ *
+ * Deliberately GET-only, and separate from the replicator's PouchDB handle:
+ * the replicator's remote handle exists to replicate, and giving the read path
+ * a client that *can* write would make "which code can modify the vault?" a
+ * harder question than it needs to be.
+ */
+function createRemoteReader(config: Config, log: Logger) {
+    const base = remoteUrl(config.couch);
+
+    return async function fetchRemote(id: string): Promise<Record<string, unknown> | undefined> {
+        const url = new URL(base);
+        const auth = url.username
+            ? "Basic " +
+              Buffer.from(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`).toString(
+                  "base64"
+              )
+            : undefined;
+        url.username = "";
+        url.password = "";
+        // `_local/` and `_design/` are literal path segments; every other
+        // slash in an ID must be encoded.
+        const encoded = /^(_local|_design)\//.test(id)
+            ? id.replace(/^([^/]+)\/(.*)$/, (_, p, rest) => `${p}/${encodeURIComponent(rest)}`)
+            : encodeURIComponent(id);
+        url.pathname = `${url.pathname}/${encoded}`;
+
+        const response = await fetch(url, {
+            method: "GET",
+            headers: { Accept: "application/json", ...(auth ? { Authorization: auth } : {}) },
+        });
+        if (response.status === 404) return undefined;
+        if (!response.ok) {
+            log.warn(`Direct read of "${id}" failed: ${response.status} ${response.statusText}`);
+            return undefined;
+        }
+        return (await response.json()) as Record<string, unknown>;
+    };
+}
+
+/**
+ * Determine the vault's storage format.
+ *
+ * Read from the vault rather than assumed. A disagreement between devices is a
+ * real problem — the plugin blocks sync on it — so it is reported rather than
+ * resolved by picking a winner, and configuration is the only way to override.
+ */
+async function resolveVaultSettings(
+    config: Config,
+    fetchRemote: ReturnType<typeof createRemoteReader>,
+    log: Logger
+): Promise<{ settings: VaultFormatSettings; salt: Uint8Array<ArrayBuffer> | undefined }> {
+    const milestone = (await fetchRemote(DOCID_MILESTONE)) as MilestoneEntry | undefined;
+    const { settings: published, conflicts, invalid, nodeCount } = readTweakValues(milestone);
+
+    for (const [key, values] of Object.entries(conflicts)) {
+        log.error(
+            `Devices disagree on "${key}": ${values.map((v) => JSON.stringify(v)).join(", ")}. ` +
+                `Set it explicitly in configuration, or resolve it in Obsidian.`
+        );
+    }
+    for (const [key, value] of Object.entries(invalid)) {
+        log.warn(`Ignoring unrecognised value for "${key}": ${JSON.stringify(value)}`);
+    }
+
+    const version = (await fetchRemote(DOCID_VERSIONING)) as { version?: number } | undefined;
+    if (version?.version !== undefined && version.version !== SUPPORTED_DB_VERSION) {
+        log.warn(
+            `Vault schema version is ${version.version}; this was built against ` +
+                `${SUPPORTED_DB_VERSION}. Reads may be wrong. Verify before trusting them.`
+        );
+    }
+
+    // Configuration wins over what the vault publishes, so a vault with
+    // conflicting devices can still be operated.
+    const settings = resolveSettings({ ...published, ...config.formatOverrides });
+
+    const syncParams = (await fetchRemote(DOCID_SYNC_PARAMETERS)) as { pbkdf2salt?: string } | undefined;
+    const salt = syncParams?.pbkdf2salt ? decodePbkdf2Salt(syncParams.pbkdf2salt) : undefined;
+
+    if (settings.encrypt && !settings.passphrase) {
+        throw new Error(
+            "This vault is encrypted but no passphrase is configured. Set E2EE_PASSPHRASE " +
+                "(or E2EE_PASSPHRASE_FILE for a Docker secret)."
+        );
+    }
+
+    log.info(
+        `Vault format from ${nodeCount} device(s): ` +
+            `encrypt=${settings.encrypt} obfuscation=${settings.usePathObfuscation} ` +
+            `compression=${settings.enableCompression} hash=${settings.hashAlg} ` +
+            `splitter=${settings.chunkSplitterVersion}`
+    );
+
+    return { settings, salt };
+}
+
+export interface RunningServer {
+    stop(): Promise<void>;
+}
+
+export async function start(config: Config = loadConfig()): Promise<RunningServer> {
+    const log = createLogger(config.logLevel);
+    log.info(`Connecting to ${redactedUrl(config.couch)}`);
+
+    const fetchRemote = createRemoteReader(config, log);
+    const { settings, salt } = await resolveVaultSettings(config, fetchRemote, log);
+    const transform = transformContextFor(settings, salt);
+
+    const replicator = new Replicator({
+        remoteUrl: remoteUrl(config.couch),
+        replicaPath: config.replicaPath,
+        transform,
+        onDecodeError: (id, error) => log.error(`Could not decode "${id}": ${error.message}`),
+    });
+
+    replicator.on("status", (status) => log.debug(`Replication ${status.phase} (lag ${status.lagMs}ms)`));
+    replicator.on("replication-error", (error) => log.error(`Replication error: ${String(error)}`));
+
+    await replicator.start();
+    log.info("Replicating. Waiting for the first pass to complete…");
+    await replicator.waitForInitialSync();
+    const docs = await replicator.refreshDocCount();
+    log.info(`Initial replication complete: ${docs.toLocaleString()} documents locally.`);
+
+    const reader = new VaultReader({ replicator, settings, fetchRemote });
+
+    const server = new FastMCP({
+        name: "obsidian-vault",
+        version: "0.1.0",
+        instructions:
+            "Read access to an Obsidian vault synced by Self-hosted LiveSync. Notes are addressed " +
+            "by vault-relative path. Reads come from a local replica that trails the server " +
+            "slightly; every response says how stale it may be, and read_note accepts fresh=true " +
+            "when that matters. This server is currently read-only.",
+
+        // The design calls for OAuth 2.0 with PKCE, which is what Claude's
+        // custom connector flow expects. Until that exists, a bearer token
+        // means the service is not relying solely on whatever sits in front of
+        // it. `authenticate` is only consulted for the HTTP transport; on
+        // stdio the transport itself is the boundary.
+        authenticate:
+            config.transport.kind === "http"
+                ? async (request) => {
+                      const presented = request.headers.authorization;
+                      const expected = `Bearer ${config.transport.bearerToken}`;
+                      // Compared in constant time: a naive comparison leaks the
+                      // token's prefix to anyone able to time the responses.
+                      if (!presented || !timingSafeEqual(presented, expected)) {
+                          log.warn("Rejected an unauthenticated request.");
+                          throw new Response("Unauthorized", { status: 401 });
+                      }
+                      return {};
+                  }
+                : undefined,
+
+        // Used by the container healthcheck. Deliberately not gated on the
+        // bearer token, and deliberately says nothing about the vault.
+        health: { enabled: true, path: "/health", message: "ok", status: 200 },
+    });
+
+    registerTools(server, {
+        replicator,
+        reader,
+        settings,
+        readOnly: config.readOnly,
+        attachmentSizeCap: config.attachmentSizeCap,
+    });
+
+    if (config.transport.kind === "stdio") {
+        await server.start({ transportType: "stdio" });
+        log.info("Serving on stdio.");
+    } else {
+        await server.start({
+            transportType: "httpStream",
+            httpStream: { host: config.transport.host, port: config.transport.port },
+        });
+        log.info(`Serving on http://${config.transport.host}:${config.transport.port}/mcp`);
+    }
+
+    if (config.readOnly) log.info("Read-only mode: no write tools are registered.");
+
+    return {
+        async stop() {
+            await server.stop();
+            await replicator.stop();
+        },
+    };
+}

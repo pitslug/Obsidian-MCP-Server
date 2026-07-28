@@ -1,0 +1,63 @@
+services:
+
+# Obsidian MCP - reads the LiveSync vault straight from CouchDB and serves it over MCP
+  obsidian-mcp:
+    container_name: obsidian-mcp
+    image: obsidian-mcp:latest
+    build:
+      context: $OBSIDIAN_MCP_SRC              # checkout of pitslug/Obsidian-MCP-Server
+      dockerfile: Dockerfile
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - docker_net
+    ports:
+      - "$OBSIDIAN_MCP_PORT:8080"
+    volumes:
+      - $DATADIR/obsidian-mcp:/data           # local replica; derived data, safe to destroy
+    secrets:
+      - obsidian_mcp_couchdb_password
+      - obsidian_mcp_bearer_token
+      # - obsidian_mcp_e2ee_passphrase        # only once E2EE is enabled on the vault
+    env_file:
+      - $ENVDIR/obsidian-mcp.env
+    environment:
+      TZ: $TZ
+      COUCHDB_PASSWORD_FILE: /run/secrets/obsidian_mcp_couchdb_password
+      MCP_BEARER_TOKEN_FILE: /run/secrets/obsidian_mcp_bearer_token
+      # E2EE_PASSPHRASE_FILE: /run/secrets/obsidian_mcp_e2ee_passphrase
+    user: "$PUID:$GUID"                       # the image has no PUID/PGID entrypoint; set the uid directly
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 1m
+      timeout: 10s
+      retries: 2
+      start_period: 60s                       # first start replicates the whole vault
+    labels:
+      - "traefik.enable=true"
+      ## HTTP Routers
+      - "traefik.http.routers.obsidian-mcp-rtr.entrypoints=websecure"
+      - "traefik.http.routers.obsidian-mcp-rtr.rule=Host(`obsidian-mcp.$DOMAINNAME`)"
+      ## Middlewares
+      # chain-no-auth: this service authenticates its own callers with a bearer
+      # token. Pocket-ID in front would block MCP clients, which cannot complete
+      # an interactive OIDC flow. Until the server implements OAuth 2.0 + PKCE
+      # (the design's intent, and what Claude's connector expects), consider an
+      # IP allowlist or Cloudflare Access as a second layer.
+      - "traefik.http.routers.obsidian-mcp-rtr.middlewares=chain-no-auth@file"
+      ## HTTP Services
+      - "traefik.http.routers.obsidian-mcp-rtr.service=obsidian-mcp-svc"
+      - "traefik.http.services.obsidian-mcp-svc.loadbalancer.server.port=8080"
+
+secrets:
+  obsidian_mcp_couchdb_password:
+    file: $SECRETSDIR/obsidian_mcp_couchdb_password
+  obsidian_mcp_bearer_token:
+    file: $SECRETSDIR/obsidian_mcp_bearer_token
+  # obsidian_mcp_e2ee_passphrase:
+  #   file: $SECRETSDIR/obsidian_mcp_e2ee_passphrase
+
+networks:
+  docker_net:
+    external: true

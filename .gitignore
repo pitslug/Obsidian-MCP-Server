@@ -8,3 +8,5 @@ coverage/
 .DS_Store
 /tmp/
 /fixtures/private/
+/tmp/
+/data/
