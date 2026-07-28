@@ -27,6 +27,8 @@ const FILE_RANGES: [string, string][] = [
 export interface BuildResult {
     indexed: number;
     skipped: number;
+    /** Index entries dropped because the note is no longer in the vault. */
+    pruned: number;
     ms: number;
 }
 
@@ -48,6 +50,7 @@ export class IndexBuilder {
         const started = Date.now();
         let indexed = 0;
         let skipped = 0;
+        const live = new Set<string>();
         this.lastSkipped = [];
 
         for (const [startkey, endkey] of FILE_RANGES) {
@@ -63,6 +66,7 @@ export class IndexBuilder {
                 if (isDeleted(doc as { deleted?: boolean; _deleted?: boolean })) continue;
 
                 const path = String(entryPath(doc as never));
+                live.add(path);
                 try {
                     const { file } = await this.reader.read(path);
                     this.index.put(file);
@@ -75,14 +79,22 @@ export class IndexBuilder {
             }
         }
 
+        // Anything the index still holds that the vault no longer has was
+        // deleted or renamed while this was not running.
+        const pruned = this.index.prune(live);
+        for (const path of pruned) this.log.debug(`Index: pruned ${path}`);
+
         // Resolution runs once at the end: a link often points at a note that
         // had not been indexed yet when the link was read.
         this.index.resolveLinks();
 
-        const result = { indexed, skipped, ms: Date.now() - started };
+        const result = { indexed, skipped, pruned: pruned.length, ms: Date.now() - started };
         this.log.info(
             `Index built: ${indexed} note(s) in ${(result.ms / 1000).toFixed(1)}s` +
-                (skipped > 0 ? `, ${skipped} skipped` : "")
+                (skipped > 0 ? `, ${skipped} skipped` : "") +
+                (pruned.length > 0
+                    ? `, ${pruned.length} stale entr${pruned.length === 1 ? "y" : "ies"} removed`
+                    : "")
         );
         return result;
     }

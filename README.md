@@ -29,7 +29,7 @@ still to come.
 | Write executor | Not started, deliberately |
 | OAuth 2.0 + PKCE | Not started — bearer token in the interim |
 
-286 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
+289 tests. `scripts/verify-vault.ts` can be pointed at a live vault read-only;
 see below.
 
 ## Running it

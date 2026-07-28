@@ -64,6 +64,10 @@ async function main() {
             ...(process.env as Record<string, string>),
             MCP_TRANSPORT: "stdio",
             REPLICA_PATH: process.env.REPLICA_PATH ?? resolve(root, "tmp/replica"),
+            // Pinned alongside the replica. Left at its default, the index
+            // would be shared with any other run on this machine, and a
+            // different vault's notes would appear in the results.
+            INDEX_PATH: process.env.INDEX_PATH ?? resolve(root, "tmp/index.sqlite"),
             // The server's own logs go to stderr and would interleave with
             // this output; keep them to real problems.
             LOG_LEVEL: process.env.LOG_LEVEL ?? "warn",
@@ -105,8 +109,48 @@ async function main() {
     console.log(heading("A note that does not exist"));
     show(await client.callTool({ name: "read_note", arguments: { path: "no/such/note.md" } }));
 
+    // Search for a word taken from a note that actually exists, so this says
+    // something real on any vault rather than looking for a term that only
+    // happens to appear in mine.
+    if (firstPath) {
+        const term = searchTermFrom(listing, firstPath);
+        if (term) {
+            console.log(heading(`search_notes: ${term}`));
+            show(await client.callTool({ name: "search_notes", arguments: { query: term } }), 12);
+        }
+    }
+
+    console.log(heading("property_inventory"));
+    show(await client.callTool({ name: "property_inventory", arguments: {} }), 20);
+
+    console.log(heading("tag_inventory"));
+    show(await client.callTool({ name: "tag_inventory", arguments: {} }), 15);
+
+    if (firstPath) {
+        console.log(heading(`note_links: ${firstPath}`));
+        show(await client.callTool({ name: "note_links", arguments: { path: firstPath } }), 15);
+    }
+
+    console.log(heading("vault_health"));
+    show(await client.callTool({ name: "vault_health", arguments: {} }), 20);
+
     await client.close();
     console.log("");
+}
+
+/**
+ * A word worth searching for, taken from a note's own filename.
+ *
+ * The filename is the safest source: it is already in the listing, so this
+ * needs no extra read, and a word from it is guaranteed to match at least the
+ * note it came from.
+ */
+function searchTermFrom(_listing: string, path: string): string | undefined {
+    const name = (path.split("/").pop() ?? path).replace(/\.[^.]+$/, "");
+    return name
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((word) => word.length >= 4)
+        .sort((a, b) => b.length - a.length)[0];
 }
 
 main().catch((error: unknown) => {

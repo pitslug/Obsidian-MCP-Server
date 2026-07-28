@@ -231,6 +231,28 @@ export class VaultIndex {
         }
     }
 
+    /** Every path currently in the index. */
+    allPaths(): string[] {
+        return (this.db.prepare(`SELECT path FROM notes`).all() as unknown as { path: string }[]).map(
+            (row) => row.path
+        );
+    }
+
+    /**
+     * Drop everything not in `live`.
+     *
+     * A rebuild adds and updates but has no way to notice absence, so without
+     * this a note deleted or renamed while the server was down stays in the
+     * index indefinitely: searchable, listed, and gone. Deletions that happen
+     * while the server is running arrive on the changes feed and are handled
+     * there; this covers the gap around a restart.
+     */
+    prune(live: ReadonlySet<string>): string[] {
+        const removed = this.allPaths().filter((path) => !live.has(path));
+        for (const path of removed) this.remove(path);
+        return removed;
+    }
+
     remove(path: string): void {
         this.db.exec("BEGIN");
         try {

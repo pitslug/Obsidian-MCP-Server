@@ -246,6 +246,35 @@ describe("updating", () => {
     });
 });
 
+describe("pruning", () => {
+    it("drops entries for notes the vault no longer has", () => {
+        // A note deleted or renamed while the server was down never appears in
+        // a rebuild, so without pruning it stays in the index: searchable,
+        // listed, and gone.
+        index.put(note("kept.md", "still here"));
+        index.put(note("gone.md", "deleted while offline"));
+
+        const removed = index.prune(new Set(["kept.md"]));
+
+        expect(removed).toEqual(["gone.md"]);
+        expect(index.count().notes).toBe(1);
+        expect(index.search({ query: "deleted" })).toEqual([]);
+    });
+
+    it("removes nothing when everything is still present", () => {
+        index.put(note("a.md", "one"));
+        index.put(note("b.md", "two"));
+        expect(index.prune(new Set(["a.md", "b.md"]))).toEqual([]);
+        expect(index.count().notes).toBe(2);
+    });
+
+    it("clears the index when the vault is empty", () => {
+        index.put(note("a.md", "one"));
+        expect(index.prune(new Set())).toEqual(["a.md"]);
+        expect(index.count().notes).toBe(0);
+    });
+});
+
 describe("schema versioning", () => {
     it("rebuilds rather than migrating when the schema version moves", () => {
         // A cache does not need migrations; it needs to be correct. Opening
