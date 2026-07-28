@@ -157,8 +157,15 @@ export function loadConfig(): Config {
         couch: {
             url: parsed.toString().replace(/\/+$/, ""),
             database: env("COUCHDB_DATABASE") ?? dbFromQuery ?? missingDatabase(),
-            username: env("COUCHDB_USER") ?? (parsed.username || undefined),
-            password: env("COUCHDB_PASSWORD") ?? (parsed.password || undefined),
+            // Credentials taken out of the URL arrive percent-encoded; ones
+            // from their own variables are literal. Decoding here means
+            // everything downstream holds the real value, and each consumer
+            // encodes it the one way its own transport needs. Getting this
+            // wrong is not subtle in the good case (a password with a `@` in
+            // it produces 401 everywhere) and is silent in the bad one, where
+            // two consumers disagree and only some requests fail.
+            username: env("COUCHDB_USER") ?? decodeComponent(parsed.username),
+            password: env("COUCHDB_PASSWORD") ?? decodeComponent(parsed.password),
         },
         replicaPath: env("REPLICA_PATH", "/data/replica") as string,
         indexPath: env("INDEX_PATH", "/data/index.sqlite") as string,
@@ -175,6 +182,22 @@ export function loadConfig(): Config {
         },
         logLevel: (env("LOG_LEVEL", "info") as Config["logLevel"]) ?? "info",
     };
+}
+
+/**
+ * Percent-decode a URL credential, tolerating one that is not encoded.
+ *
+ * A stray `%` in a password is a malformed escape sequence to
+ * `decodeURIComponent`, which throws. Taking the value verbatim in that case is
+ * better than refusing to start.
+ */
+function decodeComponent(value: string): string | undefined {
+    if (!value) return undefined;
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        return value;
+    }
 }
 
 function missingDatabase(): never {

@@ -28,6 +28,7 @@ import { VaultIndex } from "../index/index.js";
 import { IndexBuilder } from "../index/builder.js";
 import { TranscriptStore } from "../attachment/transcripts.js";
 import { loadConfig, redactedUrl, remoteUrl, type Config } from "../config.js";
+import { documentUrl, endpointFor, headersFor } from "../couch/rest.js";
 import { createLogger, type Logger } from "./logger.js";
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 
@@ -52,28 +53,18 @@ function timingSafeEqual(a: string, b: string): boolean {
  * harder question than it needs to be.
  */
 function createRemoteReader(config: Config, log: Logger) {
-    const base = remoteUrl(config.couch);
+    // The URL and auth plumbing is shared with the write path, so the one
+    // fiddly rule here - which slashes in a document ID are path separators and
+    // which are part of the ID - has a single definition rather than two that
+    // drift apart. Sharing it does not make this path able to write: the method
+    // is fixed here, and `CouchWriter` is the only thing that sends anything
+    // else.
+    const endpoint = endpointFor(config.couch);
 
     return async function fetchRemote(id: string): Promise<Record<string, unknown> | undefined> {
-        const url = new URL(base);
-        const auth = url.username
-            ? "Basic " +
-              Buffer.from(`${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`).toString(
-                  "base64"
-              )
-            : undefined;
-        url.username = "";
-        url.password = "";
-        // `_local/` and `_design/` are literal path segments; every other
-        // slash in an ID must be encoded.
-        const encoded = /^(_local|_design)\//.test(id)
-            ? id.replace(/^([^/]+)\/(.*)$/, (_, p, rest) => `${p}/${encodeURIComponent(rest)}`)
-            : encodeURIComponent(id);
-        url.pathname = `${url.pathname}/${encoded}`;
-
-        const response = await fetch(url, {
+        const response = await fetch(documentUrl(endpoint, id), {
             method: "GET",
-            headers: { Accept: "application/json", ...(auth ? { Authorization: auth } : {}) },
+            headers: headersFor(endpoint),
         });
         if (response.status === 404) return undefined;
         if (!response.ok) {

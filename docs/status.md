@@ -1,8 +1,8 @@
 # Where this is up to
 
-Written 28 July 2026, to pick up on another machine. `docs/design.md` is the
-plan; this is the progress against it and the things you would otherwise have
-to rediscover.
+Written 28 July 2026, and updated the same day when the write executor landed,
+to pick up on another machine. `docs/design.md` is the plan; this is the
+progress against it and the things you would otherwise have to rediscover.
 
 ## Getting a machine ready
 
@@ -10,7 +10,7 @@ to rediscover.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 342 tests, ~40s
+npm test          # 391 tests, ~60s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -31,9 +31,9 @@ environment, or from Docker secrets in deployment. This repo is public.
 | Attachments | PDF text extraction, indexed and retrievable |
 | Handwriting | Transcriptions stored durably, indexed, survive an index rebuild |
 | Tools | Thirteen, none of which can modify the vault |
+| Write executor | Built and tested: single-note writes, deletes, and the plan/commit protocol. No tool reaches it yet |
 | Transport | stdio and streamable HTTP, bearer token |
 | Deployment | Dockerfile and Compose for the Slugworx stack, not yet deployed |
-| Write executor | Not started, deliberately |
 | OAuth 2.0 + PKCE | Not started, bearer token in the interim |
 
 Thirteen tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
@@ -44,10 +44,22 @@ Thirteen tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
 ## The constraint that governs everything
 
 **The vault at `couchdb.slugworx.net` is live, and this code is read-only until
-the acceptance gate is met.** No code path in `src/` writes to CouchDB: the
-replicator only ever calls `replicate.from`, and the direct reader is GET-only
-by construction. `scripts/verify-vault.ts` is GET-only too, and a test asserts
-that a full run issues no other method.
+the acceptance gate is met.** That claim used to be "nothing in `src/` can
+write". It is now narrower and worth restating exactly.
+
+`src/write/couch.ts` is the only file that issues a state-changing request.
+Everything else remains read-only by construction: the replicator only ever
+calls `replicate.from`, the direct reader is GET-only, and
+`scripts/verify-vault.ts` is GET-only too, with a test asserting that a full run
+issues no other method. `test/write/surface.spec.ts` enforces the boundary
+mechanically, so a POST added to some other unit for a good reason fails the
+suite rather than quietly ending the property.
+
+Two things keep that one file harmless in the meantime. `READ_ONLY` defaults to
+true and is checked before a request is built, not after a response comes back,
+so a read-only deployment cannot reach CouchDB with a PUT at all. And no MCP
+tool calls the executor: it is reachable from tests and from code, not from a
+client.
 
 `save_transcription` is the one tool that stores anything, and it writes to a
 local SQLite file with no path to CouchDB. That is why it stays available under
@@ -60,20 +72,28 @@ revision back out of CouchDB after a transcription is saved.
    library~~ done.
 2. ~~Verified against the live vault, read-only: every file assembles, and
    re-chunking reproduces the plugin's own chunk IDs~~ done, 25/25 both.
-3. **A verified write, against a throwaway database first.** Outstanding. Nothing
-   should write to `obsidiandb` before this passes.
+3. **A verified write, against a throwaway database first.** Outstanding, and
+   now the only thing between here and writing. The executor exists and is
+   tested against an in-process CouchDB; it has never written to a database a
+   real Obsidian instance syncs from. Nothing should write to `obsidiandb`
+   before this passes.
 
 ## What to do next
 
 In rough order:
 
-1. **The write executor.** The hardest remaining unit and the reason for all the
-   care above. `composeWrite` and `composeDeletion` in `src/vault-model/` already
-   produce the documents; what does not exist is the thing that puts them in the
-   database safely. Design calls for a plan/commit protocol: a dry run that says
-   exactly what would change, then a commit against that plan.
-2. **Acceptance gate step three**, using the executor against a scratch database
-   on the same CouchDB. Not `obsidiandb`.
+1. **Acceptance gate step three**, using the executor against a scratch database
+   on the same CouchDB. Not `obsidiandb`. There is no script for this yet; the
+   shape to copy is `scripts/verify-vault.ts`, pointed at a throwaway database,
+   writing through `PlanningWriteExecutor` and reading the result back in
+   Obsidian.
+2. **The write tools.** The executor has no MCP surface. The design's write
+   surface is append, create, targeted edit by string match, set properties on
+   one note, batch set properties across a query result, and append to today's
+   daily note. Batch operations are plan-gated; the rest execute directly. Note
+   that `write()` requires the revision the content was derived from, so an
+   append tool must read, compose, and pass that revision through rather than
+   letting the executor look it up.
 3. **OAuth 2.0 with PKCE**, which is what Claude's custom connector flow expects.
    The bearer token works but is a shared secret.
 4. **Deploy.** `deploy/` is written and follows the homelab template, but the
@@ -83,6 +103,10 @@ Smaller things worth doing at some point:
 
 - `get_attachment` refuses an attachment over `ATTACHMENT_SIZE_CAP` but will
   still serve a stored transcription for it. Untested; add one.
+- The executor refuses to soft-delete a pre-chunking (`type: "notes"`) note on an
+  encrypted vault, because the tombstone would carry the note's plaintext. If the
+  vault turns out to hold such notes, the fix is to rewrite them through the
+  chunked path rather than to relax the refusal.
 - E2EE is not enabled on the vault yet. The code handles it and the differential
   tests cover it, but no real encrypted vault has been read.
 - A `.gitattributes` (`* text=auto eol=crlf`) would stop the LF/CRLF warning on
@@ -109,6 +133,17 @@ Smaller things worth doing at some point:
   not recognise. Do not "tidy" any of that away.
 - **No em dashes anywhere**, per the vault's own `CLAUDE.md`. `test/style.spec.ts`
   enforces it. There were 164 in here before it existed.
+- **Patching the local replica needs `_revisions`, not just `_rev`.** A document
+  inserted with `new_edits: false` and no ancestry has nothing to graft onto, so
+  PouchDB starts a new branch: one permanent conflict leaf per write, each a full
+  copy of the note, and pull replication never repairs it because `_revs_diff`
+  reports nothing missing. Reads keep returning the right winner, which is what
+  makes it easy to miss. `withAncestry` in `src/write/executor.ts` supplies it.
+- **A chunk being in `children` is not proof it exists as a document.** On a
+  `useEden` vault it may live only inside `eden`, and a tombstone's chunks are
+  exactly what the plugin's orphan cleanup collects. Reusing either writes a note
+  referencing chunks that exist nowhere. `reusableChunkIds` returns nothing in
+  both cases; the cost is re-sending chunks on a write that was happening anyway.
 
 ## Running it against the real vault
 
@@ -120,6 +155,9 @@ npm run verify -- --url '...' --all          # every file, not a sample
 npm run verify -- --url '...' --census       # where every document went
 npm run verify -- --url '...' --attachments  # which attachments have text
 ```
+
+Nothing above writes. There is deliberately no `npm run` that does, until gate
+step three exists.
 
 The server, over stdio, with a client attached so it does something visible:
 
