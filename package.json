@@ -1,0 +1,48 @@
+{
+  "name": "obsidian-livesync-mcp",
+  "version": "0.1.0",
+  "description": "MCP server exposing an Obsidian vault synced by Self-hosted LiveSync, read and written directly against its CouchDB.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pitslug/Obsidian-MCP-Server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pitslug/Obsidian-MCP-Server/issues"
+  },
+  "homepage": "https://github.com/pitslug/Obsidian-MCP-Server#readme",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:diff": "vitest run test/differential",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\""
+  },
+  "keywords": [
+    "obsidian",
+    "livesync",
+    "mcp",
+    "couchdb"
+  ],
+  "author": "Chris Pitman",
+  "license": "MIT",
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "octagonal-wheels": "0.1.51",
+    "xxhash-wasm": "1.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@vrtmrz/livesync-commonlib": "0.1.0",
+    "fast-check": "^3.23.2",
+    "prettier": "^3.4.2",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}
