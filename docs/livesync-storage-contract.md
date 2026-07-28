@@ -224,6 +224,44 @@ Values must also be type-checked. A string `"false"` where a boolean belongs is
 truthy, and for `handleFilenameCaseSensitive` that means every document ID gets
 the wrong casing and every write creates a duplicate, silently.
 
+## Turning encryption on later
+
+`encrypt`, `usePathObfuscation`, `useDynamicIterationCount` and
+`handleFilenameCaseSensitive` are in the plugin's `IncompatibleChanges` list.
+Changing any of them is not a setting change that takes effect going forward —
+it invalidates every document already in the database, and the plugin requires
+rebuilding both the local and the remote database.
+
+Concretely, enabling E2EE on a vault that does not have it:
+
+- **Every chunk ID changes.** The hash gains the passphrase-derived salt and the
+  `+` marker, so `h:<hash>` becomes `h:+<hash>`. No deduplication carries over;
+  the entire chunk store is rewritten.
+- **A PBKDF2 salt document appears** at `_local/obsidian_livesync_sync_parameters`.
+  Nothing can be decrypted without it, and it is readable in the clear because
+  `_local` documents bypass the transform.
+- **With path obfuscation on as well**, file document IDs become
+  `f:<sha256>`, and path, `ctime`, `mtime`, `size` and `children` all move
+  inside the encrypted `path` field, leaving zeroes and an empty array on the
+  wire.
+
+For this server that means: the passphrase becomes a required configuration
+value, and the host running it then holds the keys to the whole vault. The
+design document already treats that as inherent rather than a flaw, but it is
+the moment the security posture of the host starts to matter.
+
+Practical sequence, since the migration is a rebuild:
+
+1. Run `scripts/verify-vault.ts` before the change and keep the output.
+2. Do the migration from Obsidian, and let every device finish re-syncing.
+3. Re-run the verifier with `--passphrase`. Chunk IDs should now all start
+   `h:+`, and the re-chunk comparison should still pass — if it does, the write
+   path is correct under encryption too.
+4. Only then take the read-only toggle off, if it was ever off.
+
+The verifier needs no code changes for this; it reads `encrypt` from the vault's
+own tweak values and adjusts.
+
 ## Two upstream misspellings
 
 `_local/obsydian_livesync_milestone` and `_local/obsydian_livesync_nodeinfo` are

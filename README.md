@@ -18,12 +18,15 @@ tested. Nothing talks to a real database yet.
 
 | Unit | State |
 | --- | --- |
-| Vault model | Implemented, 151 tests |
+| Vault model | Implemented, 163 tests |
 | Replicator | Not started |
 | Index | Not started |
 | Write executor | Not started |
 | Tool layer | Not started |
 | Transport and auth | Not started |
+
+A read-only verifier (`scripts/verify-vault.ts`) can already be pointed at a
+real vault; see below.
 
 ## Why the vault model came first
 
@@ -96,6 +99,27 @@ Two things deliberately not implemented, and why:
 - **`eden` inline chunks.** An obsolete optimisation. Documents carrying them
   are rejected with a message saying so, rather than reporting their chunks as
   missing and leaving the caller unable to satisfy a request that never can be.
+
+## Verifying against a real vault
+
+`scripts/verify-vault.ts` points at a live LiveSync database and checks that
+this code understands it. It is **read-only by construction** — the only
+request method in the file is `GET`, and a test asserts that a full run issues
+nothing else — so it is safe against a production vault.
+
+```bash
+npm run verify -- --url 'https://user:password@couchdb.example.net/?db=obsidiandb'
+```
+
+It reports the vault's own format settings (read from the milestone document,
+not assumed), flags any setting two devices disagree on, assembles a sample of
+notes, and then does the check that matters: re-chunks each note and compares
+the chunk IDs it *would* write against the ones the plugin actually wrote. If
+those match, the write path deduplicates exactly as another device does.
+
+Useful flags: `--sample N`, `--passphrase` for an encrypted vault, `--verbose`
+for per-note output, and `--capture out.json` to save real documents as
+fixtures — that file contains note content, so do not commit it.
 
 ## Development
 
