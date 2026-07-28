@@ -10,7 +10,7 @@ progress against it and the things you would otherwise have to rediscover.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 413 tests, ~70s
+npm test          # 449 tests, ~70s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -30,23 +30,33 @@ environment, or from Docker secrets in deployment. This repo is public.
 | Index | SQLite FTS5: search, properties, tags, link graph |
 | Attachments | PDF text extraction, indexed and retrievable |
 | Handwriting | Transcriptions stored durably, indexed, survive an index rebuild |
-| Tools | Thirteen, none of which can modify the vault |
-| Write executor | Built and tested: single-note writes, deletes, and the plan/commit protocol. No tool reaches it yet |
-| Gate step three | Script written (`npm run verify:write`), never run against a real database |
+| Tools | Thirteen read tools, plus four write tools registered only when `READ_ONLY=false` |
+| Write executor | Built and tested: single-note writes, deletes, and the plan/commit protocol. The single-note half now has a tool surface |
+| Acceptance gate | Met. All three steps passed as of 28 July 2026 |
 | Transport | stdio and streamable HTTP, bearer token |
 | Deployment | Dockerfile and Compose for the Slugworx stack, not yet deployed |
 | OAuth 2.0 + PKCE | Not started, bearer token in the interim |
 
-Thirteen tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
+Thirteen read tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
 `property_inventory`, `find_by_property`, `tag_inventory`, `find_by_tag`,
 `note_links`, `vault_health`, `get_attachment`, `list_untranscribed`,
 `save_transcription`.
 
+Four write tools, registered only when `READ_ONLY=false`: `create_note`,
+`append_note`, `edit_note`, `set_properties`. Absent rather than disabled, so a
+read-only server does not advertise something it will refuse.
+
+Every one of them reads the note fresh from CouchDB and writes against the exact
+revision it read, in one observation. That is the whole reason
+`WriteRequest.expectedRev` is required: a tool that let the executor look the
+revision up would succeed every time and lose an edit occasionally.
+
 ## The constraint that governs everything
 
-**The vault at `couchdb.slugworx.net` is live, and this code is read-only until
-the acceptance gate is met.** That claim used to be "nothing in `src/` can
-write". It is now narrower and worth restating exactly.
+**The vault at `couchdb.slugworx.net` is live. The acceptance gate is now met,
+and what keeps writes off it is no longer a gate but a set of switches.** Worth
+restating exactly, because the claim has narrowed twice and "it is safe" is not
+a thing to leave implied.
 
 `src/write/couch.ts` is the only file that issues a state-changing request.
 Everything else remains read-only by construction: the replicator only ever
@@ -56,11 +66,17 @@ issues no other method. `test/write/surface.spec.ts` enforces the boundary
 mechanically, so a POST added to some other unit for a good reason fails the
 suite rather than quietly ending the property.
 
-Two things keep that one file harmless in the meantime. `READ_ONLY` defaults to
+Three things stand between that one file and the vault. `READ_ONLY` defaults to
 true and is checked before a request is built, not after a response comes back,
-so a read-only deployment cannot reach CouchDB with a PUT at all. And no MCP
-tool calls the executor: it is reachable from tests and from code, not from a
-client.
+so a read-only deployment cannot reach CouchDB with a PUT at all. The four write tools are
+registered only when writes are enabled, so a read-only server has no path from
+a client to the executor at all. And `COUCHDB_DATABASE` still points wherever it is configured to point:
+nothing in the code prefers the real vault.
+
+The order to relax these in is the order they are listed. Build the tools
+against a scratch database with `READ_ONLY=false`, live with that for a while,
+and only then point a configuration at `obsidiandb`, still read-only, before
+finally turning writes on there.
 
 `save_transcription` is the one tool that stores anything, and it writes to a
 local SQLite file with no path to CouchDB. That is why it stays available under
@@ -73,28 +89,27 @@ revision back out of CouchDB after a transcription is saved.
    library~~ done.
 2. ~~Verified against the live vault, read-only: every file assembles, and
    re-chunking reproduces the plugin's own chunk IDs~~ done, 25/25 both.
-3. **A verified write, against a throwaway database first.** Outstanding, and
-   now one command plus one look away. `scripts/verify-write.ts` does the
-   machine half; see "Closing the gate" below for the human half. Nothing
-   should write to `obsidiandb` before both are done.
+3. ~~A verified write, against a throwaway database first~~ done, 28 July 2026,
+   against `obsidian-writetest`, a `_replicate` copy of the real vault with one
+   Obsidian instance synced to it. `npm run verify:write` passed every check:
+   create, edit with chunk reuse, stale-write refusal, plan and commit, stale-plan
+   refusal, soft delete, write over the tombstone, and no conflict branches in
+   the replica. Confirmed by eye in Obsidian afterwards. See "Re-running the
+   gate" for how to repeat it.
 
 ## What to do next
 
 In rough order:
 
-1. **Run gate step three.** The script exists; running it needs a throwaway
-   database and an Obsidian instance pointed at it, which is why it has not been
-   run. See "Closing the gate".
-2. **The write tools.** The executor has no MCP surface. The design's write
-   surface is append, create, targeted edit by string match, set properties on
-   one note, batch set properties across a query result, and append to today's
-   daily note. Batch operations are plan-gated; the rest execute directly. Note
-   that `write()` requires the revision the content was derived from, so an
-   append tool must read, compose, and pass that revision through rather than
-   letting the executor look it up.
-3. **OAuth 2.0 with PKCE**, which is what Claude's custom connector flow expects.
+1. **The rest of the write surface.** Four single-note tools exist. Still to
+   build: batch property setting across a query result, and append to today's
+   daily note. The batch one is plan-gated, so it needs tools that expose
+   `plan()` and `commit()` and a way to render a plan a person can review in a
+   chat window. That rendering is the actual design problem; the plumbing is
+   done.
+2. **OAuth 2.0 with PKCE**, which is what Claude's custom connector flow expects.
    The bearer token works but is a shared secret.
-4. **Deploy.** `deploy/` is written and follows the homelab template, but the
+3. **Deploy.** `deploy/` is written and follows the homelab template, but the
    container has never been built on the server.
 
 Smaller things worth doing at some point:
@@ -109,6 +124,26 @@ Smaller things worth doing at some point:
   tests cover it, but no real encrypted vault has been read.
 - A `.gitattributes` (`* text=auto eol=crlf`) would stop the LF/CRLF warning on
   every file touched from a Linux machine.
+
+## Exercising the write tools by hand
+
+`npm run try` is still read-only, deliberately: it points at whatever
+`COUCHDB_URL` says, and a script that writes wherever it is pointed is not one
+to leave lying around. To drive the write tools by hand, run the server against
+the scratch database with writes on and talk to it with any MCP client:
+
+```powershell
+$env:COUCHDB_URL = "http://192.168.50.2:9113"
+$env:COUCHDB_DATABASE = "obsidian-writetest"
+$env:COUCHDB_USER = "obsidian"
+$env:COUCHDB_PASSWORD = "..."
+$env:READ_ONLY = "false"
+npm run try
+```
+
+The tools themselves are covered end to end by
+`test/integration/write-tools.spec.ts`, which runs a real MCP client against a
+server with `READ_ONLY=false`.
 
 ## Things that cost time once already
 
@@ -137,17 +172,36 @@ Smaller things worth doing at some point:
   copy of the note, and pull replication never repairs it because `_revs_diff`
   reports nothing missing. Reads keep returning the right winner, which is what
   makes it easy to miss. `withAncestry` in `src/write/executor.ts` supplies it.
+- **Traefik 400s a percent-encoded slash, so the public CouchDB hostname is
+  unusable for anything that addresses a document by ID.** A document ID here is
+  the vault path, so `daily/2026-07-28.md` is requested as
+  `daily%2F2026-07-28.md`, and `https://couchdb.slugworx.net` answers 400 while
+  the container answers 404 for the same request. Replication and `_all_docs`
+  are unaffected, which is why the read-only verifier never found it and why it
+  surfaced at the first single-document read the write path made. Point
+  `COUCHDB_URL` at the internal address: `http://couchdb:5984` in deployment,
+  `http://192.168.50.2:9113` from a machine on the LAN.
+- **`_local` documents do not replicate.** The milestone document, which is
+  where every vault setting is published, is one. So is the sync-parameters
+  document holding the E2EE salt. A database duplicated with `_replicate` has
+  neither until a device syncs to it and republishes them. This is not a CouchDB
+  quirk to work around; it is what `_local` means.
 - **A chunk being in `children` is not proof it exists as a document.** On a
   `useEden` vault it may live only inside `eden`, and a tombstone's chunks are
   exactly what the plugin's orphan cleanup collects. Reusing either writes a note
   referencing chunks that exist nowhere. `reusableChunkIds` returns nothing in
   both cases; the cost is re-sending chunks on a write that was happening anyway.
 
-## Closing the gate
+## Re-running the gate
 
-Two halves. The script does the first; only you can do the second.
+It has passed once. Repeat it after any change to the write path, and before
+pointing anything new at a database that matters.
 
-Set up a throwaway database, once:
+`obsidian-writetest` already exists and is worth keeping: a copy of the real
+vault with one device synced to it is the right place to develop the write tools
+against. Refresh it with another `_replicate` when it drifts too far.
+
+To build one from scratch again:
 
 1. Create a database on the same CouchDB, called something like
    `obsidian-writetest`. Not `obsidiandb`, and the script refuses that name plus
@@ -156,6 +210,17 @@ Set up a throwaway database, once:
    it sync. One device, because the script refuses a database more than one has
    synced to: that is what a vault in real use looks like whatever it is called.
    Override with `--expect-devices N` only after looking at why.
+
+   This step is not optional, and the reason is not obvious. A database made by
+   replicating another one arrives with no milestone document, because that is a
+   `_local` document and `_local` documents do not replicate. Without it every
+   setting falls back to a default, and `customChunkSize` defaulting to 0 caps
+   `absoluteMaxPieceSize` at 100 KiB, below the 256 KiB unit the binary path
+   uses. Every attachment then gets sliced at exactly 100 KiB while text is
+   unaffected, because its own maximum is 1 KiB either way. The write succeeds,
+   reads back correctly, and is chunked unlike everything else in the vault.
+   `verify:write` refuses to run at all until a device has published settings;
+   this is why.
 
 Then the machine half:
 
@@ -177,6 +242,17 @@ Obsidian when you are satisfied.
 
 Only when both halves have passed does anything point at `obsidiandb`, and it
 does so with `READ_ONLY` on for a first period.
+
+Duplicating the vault is a `_replicate` call against CouchDB itself, run from the
+server. Do not copy the data files: CouchDB 3.x keeps a database as shards
+registered in the internal `_dbs` database, so a copied and renamed `.couch` file
+is not a database.
+
+```bash
+curl -sS -X POST "http://127.0.0.1:9113/_replicate" -u 'obsidian' \
+  -H "Content-Type: application/json" \
+  -d '{"source":"obsidiandb","target":"obsidian-writetest","create_target":true}'
+```
 
 ## Running it against the real vault
 

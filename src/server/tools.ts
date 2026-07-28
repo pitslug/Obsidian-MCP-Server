@@ -5,10 +5,13 @@
  * tool call into calls on the units below. If something here starts making
  * decisions about the vault, it belongs in the vault model or the reader.
  *
- * This is the thin slice: read and status only. Every write tool is absent
- * rather than disabled, because the write executor does not exist yet and a
- * tool that reports "not implemented" is worse than no tool - a model will try
- * it, and the user will believe writing is a configuration away.
+ * Read and status tools live here; the ones that change the vault live in
+ * `write-tools.ts` and are registered only when writing is enabled. That split
+ * is not organisational tidiness. It means the set of tools that can modify a
+ * vault is a file you can read in one sitting, and that a read-only deployment
+ * does not merely refuse those tools but never offers them: a tool that reports
+ * "not implemented" is worse than no tool, because a model will try it and the
+ * user will believe writing is a configuration away.
  */
 
 import { z } from "zod";
@@ -57,7 +60,15 @@ export function registerTools(server: FastMCP, ctx: ToolContext): void {
                 `Staleness: ${describeLag(status.lagMs)}`,
                 `Local replica: ${docs.toLocaleString()} documents, ${status.replicated.toLocaleString()} replicated this session`,
                 `Index: ${indexed.notes} file(s): ${indexed.text} text, ${indexed.binary} binary`,
-                `Writes: ${ctx.readOnly ? "disabled (read-only)" : "enabled"}`,
+                // Named rather than a bare "enabled". A model that can see
+                // which tools exist stops guessing whether an edit is possible,
+                // and a person reading this wants to know exactly what has been
+                // let through the door.
+                `Writes: ${
+                    ctx.readOnly
+                        ? "disabled (read-only), so no registered tool can modify the vault"
+                        : "enabled (create_note, append_note, edit_note, set_properties)"
+                }`,
                 `Encryption: ${ctx.settings.encrypt ? "on" : "off"}` +
                     (ctx.settings.usePathObfuscation ? ", path obfuscation on" : ""),
             ];
@@ -292,8 +303,7 @@ export function registerAttachmentTool(server: FastMCP, ctx: ToolContext): void 
                             : "",
                     ]
                         .filter(Boolean)
-                        .join("\n") +
-                    `\n\n---\n\n${transcript.text}`
+                        .join("\n") + `\n\n---\n\n${transcript.text}`
                 );
             }
 

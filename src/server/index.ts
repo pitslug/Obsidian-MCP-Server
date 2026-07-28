@@ -24,6 +24,8 @@ import { Replicator } from "../replicator/index.js";
 import { VaultReader } from "../vault/reader.js";
 import { registerAttachmentTool, registerTools, registerTranscriptionTools } from "./tools.js";
 import { registerSearchTools } from "./search-tools.js";
+import { registerWriteTools } from "./write-tools.js";
+import { CouchWriter, PlanningWriteExecutor } from "../write/index.js";
 import { VaultIndex } from "../index/index.js";
 import { IndexBuilder } from "../index/builder.js";
 import { TranscriptStore } from "../attachment/transcripts.js";
@@ -227,6 +229,33 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     registerAttachmentTool(server, toolContext);
     registerTranscriptionTools(server, toolContext);
     registerSearchTools(server, { index });
+
+    // The write tools are registered only when writing is enabled, rather than
+    // registered and refusing. A tool that answers "read-only mode" is a tool a
+    // model will try, and the person on the other end is then left believing
+    // that writing is a configuration away when it is a decision away.
+    //
+    // The executor is constructed here regardless of the toggle so that the
+    // read-only path exercises the same wiring, and because CouchWriter refuses
+    // a state-changing request before building it when it is read-only. Two
+    // independent switches on the same door.
+    const executor = new PlanningWriteExecutor({
+        couch: new CouchWriter({ couch: config.couch, readOnly: config.readOnly }),
+        replicator,
+        settings,
+        transform,
+        readOnly: config.readOnly,
+        planCeiling: config.planCeiling,
+        onWarning: (message) => log.warn(message),
+    });
+
+    if (!config.readOnly) {
+        registerWriteTools(server, { reader, executor });
+        log.warn(
+            `Writes are ENABLED against ${redactedUrl(config.couch)}. ` +
+                `Four tools can modify this vault: create_note, append_note, edit_note, set_properties.`
+        );
+    }
 
     if (config.transport.kind === "stdio") {
         await server.start({ transportType: "stdio" });
