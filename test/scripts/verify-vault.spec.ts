@@ -17,6 +17,7 @@ import { dirname, resolve } from "node:path";
 import { composeWrite } from "../../src/vault-model/compose.js";
 import { resolveSettings } from "../../src/vault-model/settings.js";
 import { DOCID_MILESTONE, DOCID_VERSIONING, SUPPORTED_DB_VERSION } from "../../src/vault-model/constants.js";
+import { encodeDocumentId } from "../../scripts/verify-vault.js";
 
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -119,7 +120,20 @@ function startServer(): Promise<void> {
             }
 
             // /{db}/{docid}
-            const id = decodeURIComponent(segments.slice(1).join("/"));
+            //
+            // Strict about CouchDB's URL scheme, because a lenient mock hid a
+            // real bug: `_local/x` encoded whole becomes `_local%2Fx`, which
+            // CouchDB rejects with 400 (an underscore-prefixed ID that is not a
+            // recognised prefix), not 404. Reject it here too.
+            const raw = segments.slice(1);
+            const first = decodeURIComponent(raw[0] ?? "");
+            if (first.startsWith("_") && !["_local", "_design"].includes(first)) {
+                return json({ error: "illegal_docid", reason: `Invalid document ID: ${first}` }, 400);
+            }
+            const id =
+                first === "_local" || first === "_design"
+                    ? `${first}/${raw.slice(1).map(decodeURIComponent).join("/")}`
+                    : decodeURIComponent(raw.join("/"));
             const doc = docs.get(id);
             return doc ? json(doc) : json({ error: "not_found" }, 404);
         });
@@ -209,6 +223,18 @@ describe("verify-vault against a healthy vault", () => {
     it("issued only GET requests — nothing that could modify the vault", () => {
         expect(methodsSeen.length).toBeGreaterThan(5);
         expect([...new Set(methodsSeen)]).toEqual(["GET"]);
+    });
+});
+
+describe("document ID encoding", () => {
+    it("keeps the slash in _local and _design, encodes it everywhere else", () => {
+        // Regression: encoding the whole ID gave `_local%2F…`, which CouchDB
+        // answers with 400, aborting the run before it read any settings.
+        expect(encodeDocumentId(DOCID_MILESTONE)).toBe("_local/obsydian_livesync_milestone");
+        expect(encodeDocumentId("_design/foo")).toBe("_design/foo");
+        expect(encodeDocumentId("daily/2026-07-28.md")).toBe("daily%2F2026-07-28.md");
+        expect(encodeDocumentId("folder/note with spaces.md")).toBe("folder%2Fnote%20with%20spaces.md");
+        expect(encodeDocumentId("h:+abc")).toBe("h%3A%2Babc");
     });
 });
 

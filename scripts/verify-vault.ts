@@ -32,9 +32,10 @@
  */
 
 import { writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { resolve as resolvePath } from "node:path";
 import {
     assembleFile,
-    contentKind,
     ChunkHasher,
     CHUNK_ID_RANGE_END,
     decodeDocument,
@@ -120,6 +121,27 @@ function fail(message: string): never {
 // Transport — GET only, by construction
 // ---------------------------------------------------------------------------
 
+/**
+ * Percent-encode a document ID for use in a URL path.
+ *
+ * The `_local/` and `_design/` prefixes are literal path segments in CouchDB's
+ * URL scheme, so their slash must survive. Every other slash — and a vault path
+ * is full of them, since the path *is* the document ID — must be encoded, or
+ * CouchDB reads it as a further path segment.
+ *
+ * Encoding the whole ID uniformly yields `_local%2Fobsydian_livesync_milestone`,
+ * which CouchDB rejects with a 400 rather than a 404, because an ID beginning
+ * with an underscore that is not a recognised prefix is invalid.
+ */
+export function encodeDocumentId(id: string): string {
+    for (const prefix of ["_local/", "_design/"]) {
+        if (id.startsWith(prefix)) {
+            return prefix + encodeURIComponent(id.slice(prefix.length));
+        }
+    }
+    return encodeURIComponent(id);
+}
+
 class ReadOnlyClient {
     constructor(
         private readonly base: string,
@@ -153,7 +175,13 @@ class ReadOnlyClient {
 
         if (response.status === 404) return undefined;
         if (!response.ok) {
-            throw new Error(`GET ${url.pathname} → ${response.status} ${response.statusText}`);
+            // CouchDB puts a useful reason in the body; a bare status is not
+            // enough to tell a bad path from a bad password.
+            const body = await response.text().catch(() => "");
+            throw new Error(
+                `GET ${decodeURIComponent(url.pathname)} → ${response.status} ${response.statusText}` +
+                    (body ? `\n    ${body.slice(0, 300)}` : "")
+            );
         }
         return (await response.json()) as T;
     }
@@ -163,7 +191,7 @@ class ReadOnlyClient {
     }
 
     doc<T>(id: string) {
-        return this.get<T>(`/${encodeURIComponent(id)}`);
+        return this.get<T>(`/${encodeDocumentId(id)}`);
     }
 
     /** A page of documents in an ID range, with bodies. */
@@ -449,7 +477,28 @@ async function main() {
     console.log(ok("No problems found.\n"));
 }
 
-main().catch((error) => {
-    console.error(`\n  ${(error as Error).stack ?? error}\n`);
-    process.exit(1);
-});
+/**
+ * Only run when invoked directly. The tests import `encodeDocumentId` from
+ * here, and without this guard that import would execute a full run — and call
+ * `process.exit` inside the test worker.
+ */
+function isEntrypoint(): boolean {
+    const invoked = process.argv[1];
+    if (!invoked) return false;
+    try {
+        return resolvePath(invoked) === fileURLToPath(import.meta.url);
+    } catch {
+        return false;
+    }
+}
+
+if (isEntrypoint()) {
+    main().catch((error) => {
+        const message = (error as Error).message ?? String(error);
+        // An HTTP failure is an operational problem, not a crash; a stack trace
+        // buries the one line that says what went wrong.
+        const operational = /^GET /.test(message);
+        console.error(`\n  ${operational ? message : ((error as Error).stack ?? message)}\n`);
+        process.exit(1);
+    });
+}

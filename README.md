@@ -18,7 +18,7 @@ tested. Nothing talks to a real database yet.
 
 | Unit | State |
 | --- | --- |
-| Vault model | Implemented, 163 tests |
+| Vault model | Implemented, 164 tests |
 | Replicator | Not started |
 | Index | Not started |
 | Write executor | Not started |
