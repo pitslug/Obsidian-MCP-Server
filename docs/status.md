@@ -147,8 +147,10 @@ revision back out of CouchDB after a transcription is saved.
 
 In rough order:
 
-1. **Deploy.** `deploy/` is written and follows the homelab template, but the
-   container has never been built on the server.
+1. **Deploy.** `deploy/README.md` is the runbook and it is current: the
+   Pocket-ID prerequisites, the exact env values, the curl checks that catch a
+   broken handshake, and a four-step order for turning writes on. The container
+   has still never been built on the server.
 
 2. **Re-run the gate.** The write path changed, so `npm run verify:write`
    against `obsidian-writetest` is owed before anything points at `obsidiandb`.

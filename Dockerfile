@@ -29,9 +29,14 @@ RUN npm ci --omit=dev
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 
+# All three stores live under /data. The transcript store is named explicitly
+# alongside the other two even though the code defaults it to the same place:
+# it is the one file here that cannot be recomputed, and leaving it implicit
+# invites someone to point the other two elsewhere and take it with them.
 ENV NODE_ENV=production \
     REPLICA_PATH=/data/replica \
     INDEX_PATH=/data/index.sqlite \
+    TRANSCRIPT_PATH=/data/transcripts.sqlite \
     MCP_TRANSPORT=http \
     MCP_HOST=0.0.0.0 \
     MCP_PORT=8080 \

@@ -22,16 +22,16 @@ services:
       - $DATADIR/obsidian-mcp:/data
     secrets:
       - obsidian_mcp_couchdb_password
-      - obsidian_mcp_bearer_token
+      # - obsidian_mcp_bearer_token           # only for AUTH_MODE=bearer; OAuth needs no secret here
       # - obsidian_mcp_e2ee_passphrase        # only once E2EE is enabled on the vault
     env_file:
       - $ENVDIR/obsidian-mcp.env
     environment:
       TZ: $TZ
       COUCHDB_PASSWORD_FILE: /run/secrets/obsidian_mcp_couchdb_password
-      MCP_BEARER_TOKEN_FILE: /run/secrets/obsidian_mcp_bearer_token
+      # MCP_BEARER_TOKEN_FILE: /run/secrets/obsidian_mcp_bearer_token
       # E2EE_PASSPHRASE_FILE: /run/secrets/obsidian_mcp_e2ee_passphrase
-    user: "$PUID:$GUID"                       # the image has no PUID/PGID entrypoint; set the uid directly
+    user: "$PUID:$PGID"                       # the image has no PUID/PGID entrypoint; set the uid directly
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 1m
@@ -44,11 +44,16 @@ services:
       - "traefik.http.routers.obsidian-mcp-rtr.entrypoints=websecure"
       - "traefik.http.routers.obsidian-mcp-rtr.rule=Host(`obsidian-mcp.$DOMAINNAME`)"
       ## Middlewares
-      # chain-no-auth: this service authenticates its own callers with a bearer
-      # token. Pocket-ID in front would block MCP clients, which cannot complete
-      # an interactive OIDC flow. Until the server implements OAuth 2.0 + PKCE
-      # (the design's intent, and what Claude's connector expects), consider an
-      # IP allowlist or Cloudflare Access as a second layer.
+      # chain-no-auth, because this service authenticates its own callers: it is
+      # an OAuth 2.1 resource server, and it accepts only tokens Pocket-ID
+      # issued for this service specifically. traefik-forward-auth in front
+      # would break it, since an MCP client cannot complete an interactive
+      # browser login for a forward-auth cookie. Same reason Nextcloud and
+      # Immich sit on this chain.
+      #
+      # /health and /.well-known/oauth-protected-resource are deliberately
+      # unauthenticated: the healthcheck needs the first, and a client cannot
+      # discover where to authenticate without the second.
       - "traefik.http.routers.obsidian-mcp-rtr.middlewares=chain-no-auth@file"
       ## HTTP Services
       - "traefik.http.routers.obsidian-mcp-rtr.service=obsidian-mcp-svc"
@@ -57,8 +62,8 @@ services:
 secrets:
   obsidian_mcp_couchdb_password:
     file: $SECRETSDIR/obsidian_mcp_couchdb_password
-  obsidian_mcp_bearer_token:
-    file: $SECRETSDIR/obsidian_mcp_bearer_token
+  # obsidian_mcp_bearer_token:
+  #   file: $SECRETSDIR/obsidian_mcp_bearer_token
   # obsidian_mcp_e2ee_passphrase:
   #   file: $SECRETSDIR/obsidian_mcp_e2ee_passphrase
 

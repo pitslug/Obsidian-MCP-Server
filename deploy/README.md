@@ -14,82 +14,183 @@ First start replicates everything, which for a vault of this size is a minute
 or two. `start_period: 60s` on the healthcheck covers it; raise it if the
 container is marked unhealthy before it finishes.
 
+## Before anything else
+
+**Pocket-ID must be v2.10.0 or later.** That release added OAuth APIs with
+scoped permissions, and this service is built on them: it is an OAuth 2.1
+resource server that accepts only tokens audience-bound to itself. Pocket-ID is
+one of the pinned images on this stack, so check what is actually running before
+starting.
+
+Register two things in Pocket-ID, in this order:
+
+1. **An API**, identifier `https://obsidian-mcp.slugworx.net/mcp`, with the
+   permissions `vault:read` and `vault:write`. The identifier must match
+   `MCP_PUBLIC_URL` and the URL typed into Claude, character for character.
+
+    Not optional. Claude always sends that URL as the RFC 8707 `resource`
+    parameter, and Pocket-ID answers a `resource` naming an API it does not know
+    with `invalid_target`, which fails the authorization request before any token
+    exists. The symptom is a connector that will not connect, with nothing wrong
+    at this end and no request ever reaching this service.
+
+2. **An OIDC client** called something like `Claude`, confidential, PKCE on,
+   with both callback URLs, since Claude uses either host:
+
+       https://claude.ai/api/mcp/auth_callback
+       https://claude.com/api/mcp/auth_callback
+
+    Grant it `vault:read` on the API above. Grant `vault:write` later, when
+    writes are meant to be on.
+
+Keep the client ID and secret: they go into Claude, not into this deployment.
+Nothing here holds an OAuth credential.
+
 ## Steps
 
 1. Put a checkout of the repository somewhere on the server, and point
    `$OBSIDIAN_MCP_SRC` at it.
 
-2. Create the secrets:
+2. Create the secret:
 
-   ```bash
-   printf '%s' 'the-couchdb-password'  > $SECRETSDIR/obsidian_mcp_couchdb_password
-   openssl rand -base64 48 | tr -d '\n' > $SECRETSDIR/obsidian_mcp_bearer_token
-   chmod 600 $SECRETSDIR/obsidian_mcp_*
-   ```
+    ```bash
+    printf '%s' 'the-couchdb-password' > $SECRETSDIR/obsidian_mcp_couchdb_password
+    chmod 600 $SECRETSDIR/obsidian_mcp_couchdb_password
+    ```
 
-   `printf` rather than `echo`, so no trailing newline lands in the password.
-   (The server strips one anyway, but the habit is worth keeping for secrets
-   read by things that do not.)
+    `printf` rather than `echo`, so no trailing newline lands in the password.
+    (The server strips one anyway, but the habit is worth keeping for secrets
+    read by things that do not.)
 
-3. Copy `obsidian-mcp.env.example` to `$ENVDIR/obsidian-mcp.env` and set the
-   CouchDB URL, database and username.
+    There is no bearer token secret under `AUTH_MODE=oauth`. The compose file
+    keeps one commented out for the fallback mode.
+
+3. Copy `obsidian-mcp.env.example` to `$ENVDIR/obsidian-mcp.env`. The values
+   that matter:
+
+    - `COUCHDB_URL` - the **internal** address, `http://couchdb:5984`. Not the
+      public hostname: Traefik answers 400 to a percent-encoded slash, and every
+      document ID here is a vault path, so single-document reads fail against it
+      while replication succeeds.
+    - `MCP_PUBLIC_URL=https://obsidian-mcp.slugworx.net/mcp` - exactly as above.
+    - `OAUTH_ISSUER=https://auth.slugworx.net`
+    - `VAULT_TIMEZONE=Australia/Brisbane` - the container runs in UTC, so
+      without this every evening's `append_daily` capture is filed under the
+      previous day and nothing reports an error.
+    - `READ_ONLY=true` for the first period.
 
 4. Add to `.env`:
 
-   ```
-   OBSIDIAN_MCP_PORT=8095
-   OBSIDIAN_MCP_SRC=/mnt/user/appdata/src/obsidian-mcp-server
-   ```
+    ```
+    OBSIDIAN_MCP_PORT=8095
+    OBSIDIAN_MCP_SRC=/mnt/user/appdata/src/obsidian-mcp-server
+    ```
 
 5. Copy `compose/obsidian-mcp.yml` into `compose/`, add the `include:` line to
    `slugworx-docker.yml`, then:
 
-   ```bash
-   docker compose -f slugworx-docker.yml up -d --build obsidian-mcp
-   ```
+    ```bash
+    docker compose -f slugworx-docker.yml up -d --build obsidian-mcp
+    ```
 
 6. Watch the first replication:
 
-   ```bash
-   docker logs -f obsidian-mcp
-   ```
+    ```bash
+    docker logs -f obsidian-mcp
+    ```
 
-7. Confirm it is up, and that the token is actually required:
+    It logs the auth mode on startup. The line to look for begins
+    `Callers authenticate with OAuth 2.1 against` and names Pocket-ID. Anything
+    else means the env file did not take.
 
-   ```bash
-   curl -s https://obsidian-mcp.slugworx.net/health          # → ok
-   curl -s -o /dev/null -w '%{http_code}\n' \
-        https://obsidian-mcp.slugworx.net/mcp                # → 401
-   ```
+7. Check the handshake from outside, which is the part that is easy to get
+   wrong and silent when it is:
 
-## Authentication
+    ```bash
+    # Unauthenticated: 200, and says nothing about the vault
+    curl -s https://obsidian-mcp.slugworx.net/health
 
-The service authenticates its own callers with a bearer token, so it sits
-behind `chain-no-auth@file` rather than `chain-auth@file`. Pocket-ID in front
-would block MCP clients, which cannot complete an interactive OIDC flow.
+    # The metadata a client discovers. resource must be the exact URL above,
+    # and authorization_servers must name Pocket-ID.
+    curl -s https://obsidian-mcp.slugworx.net/.well-known/oauth-protected-resource
 
-That is weaker than the design intends. The design calls for OAuth 2.0 with
-PKCE implemented in the server, which is what Claude's custom connector flow
-expects, with an IP allowlist or Cloudflare Access in front during initial
-rollout. Until that exists, consider adding one of those as a second layer - the token is a single shared credential, and it is the only thing between the
-internet and the full text of the vault.
+    # The challenge. 401, and the header must carry resource_metadata.
+    curl -si -X POST https://obsidian-mcp.slugworx.net/mcp \
+         -H 'content-type: application/json' \
+         -H 'accept: application/json, text/event-stream' \
+         -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+    ```
+
+    A `WWW-Authenticate` without `resource_metadata=` is the failure worth
+    catching here: the client never learns where the authorization server is,
+    and reports only that it could not reach the server.
+
+8. Add the connector in Claude: a custom connector pointed at
+   `https://obsidian-mcp.slugworx.net/mcp`, with the client ID and secret from
+   Pocket-ID.
+
+9. Then the usual checklist items: a Homepage entry, and an Uptime Kuma monitor
+   against `http://obsidian-mcp:8080/health` on `docker_net`. Monitor `/health`
+   rather than `/mcp`, which correctly answers 401 and would read as down.
+
+## Rolling out writes
+
+Four separate switches stand between this container and the vault, and they are
+worth moving one at a time rather than together:
+
+1. `READ_ONLY=true`, and the client granted only `vault:read`. Live with it.
+2. `READ_ONLY=false`, client still only `vault:read`. Every write tool should
+   refuse, naming `vault:write`. This proves the scope gate rather than assuming
+   it, and it costs one reconnect.
+3. Grant `vault:write` in Pocket-ID, against `obsidian-writetest`.
+4. Point `COUCHDB_DATABASE` at `obsidiandb`.
+
+Step 2 is the one that is easy to skip. It is also the only step that tests a
+control rather than exercising a path that was already open.
+
+## Network
+
+Anthropic's traffic comes from `160.79.104.0/21` and must reach **both**
+`obsidian-mcp.slugworx.net` and `auth.slugworx.net`. Discovery requests to
+Pocket-ID come from the same range as the MCP requests, so a Cloudflare rule or
+WAF that covers one host and not the other breaks the flow in a way that looks
+like this service being unreachable.
+
+Claude waits 10 seconds for discovery and token endpoints and 30 for refresh.
+Traefik's rate limit (`average: 100`) is far above anything a connector
+generates.
 
 ## Rollback
 
-Stopping the container removes nothing: it is not a sync peer, and it has never
+Stopping the container removes nothing, and while `READ_ONLY=true` it has never
 written to CouchDB. Devices carry on exactly as before.
 
 ```bash
 docker compose -f slugworx-docker.yml stop obsidian-mcp
-rm -rf $DATADIR/obsidian-mcp/replica    # optional; rebuilds on next start
+rm -rf $DATADIR/obsidian-mcp/replica       # optional; rebuilds on next start
+rm -f  $DATADIR/obsidian-mcp/index.sqlite  # optional; rebuilds from the replica
 ```
+
+**Do not delete `$DATADIR/obsidian-mcp/transcripts.sqlite`.** See below.
 
 No Obsidian plugin configuration is touched, so there is no client-side change
 to undo.
 
 ## Backups
 
-`$DATADIR/obsidian-mcp` holds only the replica, which is derived from CouchDB
-and rebuilds itself. It does not need to be in the nightly backup, and
-excluding it saves backing up a second copy of the vault. The vault's own
-backup is CouchDB's.
+`$DATADIR/obsidian-mcp` must be in the nightly backup, for one file in it.
+
+The replica and the index are derived: destroy either and it rebuilds from
+CouchDB, and the vault's real backup is CouchDB's own. But `transcripts.sqlite`
+holds the transcriptions of handwritten pages, and **nothing can recompute
+them** - each one exists because a model read the ink once. It is the only data
+in this system that is not a copy of something else.
+
+That is why the store is a separate file from the index, runs in
+`journal_mode = DELETE` so a file-level backup cannot copy it mid-write, and
+keeps a history table so a bad rewrite does not destroy a good transcription.
+None of that helps if the directory is excluded from the backup.
+
+An earlier version of this file said the opposite, on the reasoning that the
+directory held only the replica. That was true when it was written, and stopped
+being true when transcription landed.
