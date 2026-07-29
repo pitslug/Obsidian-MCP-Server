@@ -110,6 +110,20 @@ describe("text round trip", () => {
         expect(assembled.text).toBe("x");
     });
 
+    it("preserves a note that begins with the ciphertext marker", async () => {
+        // `%=` is what E2EE v2 stamps on the front of an encrypted payload, and
+        // it is also a perfectly ordinary way for a note to start - a printf
+        // format string, a spreadsheet formula, a shell snippet. An unencrypted
+        // vault holding one used to be told its own content was ciphertext, on
+        // a read that could never succeed. Found by the property test above, on
+        // counterexample ["%="].
+        const cases = ["%=", "%~", "%=d\n", "%= a formula\n\nand a body.\n", "%=" + filler(9_000, 5)];
+        for (const text of cases) {
+            const { assembled } = await roundTrip("marker.md", { kind: "text", text });
+            expect(assembled.text, JSON.stringify(text.slice(0, 12))).toBe(text);
+        }
+    });
+
     it("handles content that is only whitespace", async () => {
         const text = " \n\t\r\n".repeat(500);
         const { assembled } = await roundTrip("ws.md", { kind: "text", text });

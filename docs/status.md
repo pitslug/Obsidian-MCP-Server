@@ -359,6 +359,17 @@ server with `READ_ONLY=false`.
   exactly what the plugin's orphan cleanup collects. Reusing either writes a note
   referencing chunks that exist nowhere. `reusableChunkIds` returns nothing in
   both cases; the cost is re-sending chunks on a write that was happening anyway.
+- **A wire marker is only a marker in the position it is defined for.**
+  `assertDecoded` refused any chunk whose payload began `%=`, the E2EE v2
+  ciphertext prefix. But `%=` is also how a note about printf, a spreadsheet
+  formula or shell parameter expansion starts, so on an unencrypted vault a real
+  note was reported as ciphertext, on a read that could never succeed. The check
+  is now gated on the chunk ID: encryption appends `+` to the hash, so ciphertext
+  is always `h:+...`, and anything else is content whatever it begins with.
+  Found by `test/vault-model/round-trip.spec.ts`, whose random seed produced the
+  counterexample `["%="]` on about one run in ten while CI stayed green on the
+  same commit. That is the argument for running the suite rather than reading the
+  badge.
 
 ## Re-running the gate
 

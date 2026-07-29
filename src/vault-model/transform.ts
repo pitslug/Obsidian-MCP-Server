@@ -264,9 +264,22 @@ export async function encodeDocument<T extends AnyDocument>(
  * Called on the way in to assembly, not merely on the way out of decoding - a
  * caller that forgets to decode is the realistic mistake, and it produces
  * content that looks like a note rather than an error.
+ *
+ * The ciphertext test is gated on the chunk ID, because `%=` is a perfectly
+ * ordinary way for a note to begin - a printf format string, a spreadsheet
+ * formula, a shell snippet - and an unencrypted vault storing one would
+ * otherwise be told its own content was ciphertext, on a read it could never
+ * satisfy. The gate is sound in this direction: encryption appends `+` to the
+ * hash, so an encrypted chunk always has an `h:+` ID. The converse does not
+ * hold, which is why `encodeDocument` cannot use the prefix alone (see
+ * `TransformContext.encryptChunks`), but "not `h:+`, therefore not encrypted"
+ * is exactly what is needed here.
  */
 export function assertDecoded(id: string, data: string): void {
-    if (data.startsWith(ENCRYPT_HKDF_PREFIX) || data.startsWith(ENCRYPT_V3_PREFIX)) {
+    if (
+        isEncryptedChunkId(id) &&
+        (data.startsWith(ENCRYPT_HKDF_PREFIX) || data.startsWith(ENCRYPT_V3_PREFIX))
+    ) {
         throw new DecryptionError(
             `Chunk "${id}" still looks encrypted (payload begins "${data.slice(0, 2)}"). ` +
                 `Decode the document before assembling it; refusing to return ciphertext as content.`

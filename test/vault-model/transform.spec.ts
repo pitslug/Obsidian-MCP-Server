@@ -9,13 +9,19 @@
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { createPBKDF2Salt } from "octagonal-wheels/encryption/hkdf.js";
-import { decodeDocument, encodeDocument, isUntransformable } from "../../src/vault-model/transform.js";
+import {
+    assertDecoded,
+    decodeDocument,
+    encodeDocument,
+    isUntransformable,
+} from "../../src/vault-model/transform.js";
 import { DecryptionError, decodePbkdf2Salt, type CryptoContext } from "../../src/vault-model/crypto.js";
 import { E2EEAlgorithms } from "../../src/vault-model/settings.js";
 import {
     DOCID_MILESTONE,
     ENCRYPTED_META_PREFIX,
     ENCRYPT_HKDF_PREFIX,
+    MARK_SHIFT_COMPRESSED,
     TYPE_CHUNK,
     TYPE_NOTE_PLAIN,
 } from "../../src/vault-model/constants.js";
@@ -158,6 +164,34 @@ describe("chunk payloads", () => {
         await expect(
             decodeDocument(wire, { crypto: undefined, enableCompression: false, encryptChunks: false })
         ).rejects.toThrow(DecryptionError);
+    });
+});
+
+describe("refusing content that was never decoded", () => {
+    it("catches an encrypted chunk that reached assembly undecoded", async () => {
+        const wire = await encodeDocument(encryptedChunk("secret"), {
+            crypto: v2,
+            enableCompression: false,
+            encryptChunks: true,
+        });
+        expect(() => assertDecoded(String(wire._id), wire.data)).toThrow(DecryptionError);
+    });
+
+    it("catches a chunk that is still compressed", () => {
+        expect(() => assertDecoded("h:+abc", MARK_SHIFT_COMPRESSED + "payload")).toThrow(DecryptionError);
+        // Compression is orthogonal to encryption, so this one is not gated on
+        // the ID: the marker is three control characters, which no note begins
+        // with, unlike "%=".
+        expect(() => assertDecoded("h:abc", MARK_SHIFT_COMPRESSED + "payload")).toThrow(DecryptionError);
+    });
+
+    it("lets a plain chunk through even when its content begins with the marker", () => {
+        // The whole point: in a vault with encryption off, "%=" is content.
+        // Encryption appends "+" to the hash, so a chunk whose ID is not "h:+"
+        // cannot be ciphertext however its payload happens to start.
+        expect(() => assertDecoded("h:5be1iqy1t4ip", ENCRYPT_HKDF_PREFIX)).not.toThrow();
+        expect(() => assertDecoded("h:abc", "%= printf style\n")).not.toThrow();
+        expect(() => assertDecoded("h:abc", "%~ deprecated marker")).not.toThrow();
     });
 });
 
