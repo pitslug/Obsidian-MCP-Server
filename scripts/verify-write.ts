@@ -10,9 +10,16 @@
  * What it proves, and what it cannot
  *
  * It proves that every write path composes documents CouchDB accepts and this
- * code reads back correctly: create, edit, plan and commit, soft delete,
- * undelete. It proves chunk reuse does not orphan a chunk, and that the plan
- * protocol refuses a stale plan rather than applying it.
+ * code reads back correctly: create, edit, insert under a heading, set
+ * properties across several notes, plan and commit, soft delete, undelete. It
+ * proves chunk reuse does not orphan a chunk, and that the plan protocol
+ * refuses both a stale plan and content composed from a read that went stale
+ * while the plan was being made.
+ *
+ * It also reports, read-only, what `append_daily` would infer as this vault's
+ * daily note template. That is worth looking at even when every check passes:
+ * a wrong inference creates notes in a folder nobody opens, which looks exactly
+ * like notes that were never created.
  *
  * It cannot prove Obsidian is happy, because Obsidian is not a library this can
  * call. That part is yours: point one Obsidian instance at the same throwaway
@@ -72,7 +79,11 @@ import { Replicator } from "../src/replicator/index.js";
 import { CouchWriter } from "../src/write/couch.js";
 import { PlanningWriteExecutor } from "../src/write/plans.js";
 import { PlanStaleError } from "../src/write/plans.js";
+import { renderPlan } from "../src/write/render.js";
 import { assertScratchDatabase } from "../src/write/scratch.js";
+import { appendUnderHeading } from "../src/note/sections.js";
+import { editFrontmatter } from "../src/note/frontmatter.js";
+import { civilDateIn, fillTemplate, hostTimeZone, inferDailyFormat } from "../src/note/daily.js";
 import { endpointFor, documentUrl, headersFor } from "../src/couch/rest.js";
 import type { CouchConfig } from "../src/config.js";
 
@@ -477,6 +488,251 @@ async function main() {
         );
         expect(`"${secondPath}" is back, saying "Written over a tombstone."`);
 
+        // --- Appending under a heading ---------------------------------------
+        //
+        // Every edit above appended at the end of a note. This one inserts in
+        // the middle, which is the case where chunk reuse has something to get
+        // wrong: the chunks after the insertion point shift, and a splitter
+        // that reuses the wrong ones produces a note that assembles into
+        // plausible nonsense rather than failing.
+
+        console.log(heading("Appending under a heading"));
+        const structuredPath = `${FOLDER}/structured.md`;
+        const structured =
+            `# Meeting\n\n## Actions\n\n` +
+            Array.from({ length: 40 }, (_unused, i) => `- action ${i}`).join("\n") +
+            `\n\n## Attendees\n\n- Chris\n`;
+
+        const structuredCreate = await executor.write({
+            path: structuredPath,
+            content: text(structured),
+            expectedRev: null,
+        });
+        created.push(structuredPath);
+
+        const withAction = appendUnderHeading(structured, "Actions", "- inserted by verify:write");
+        const insertReceipt = await executor.write({
+            path: structuredPath,
+            content: text(withAction.text),
+            expectedRev: structuredCreate.rev,
+        });
+
+        check(!withAction.headingCreated, `Found the "Actions" section rather than creating one`);
+        check(
+            (await verifier.text(insertReceipt.id, ctx)) === withAction.text,
+            "An insertion in the middle of a note reads back byte-identical",
+            "This is the one that matters here: the chunks after the insertion point moved, " +
+                "and what reassembles is not what was sent."
+        );
+        check(
+            withAction.text.includes("- action 39\n\n- inserted by verify:write\n\n## Attendees"),
+            "The new line landed at the end of the section, above the next heading",
+            "It went somewhere else in the note, which is what appending to the end would have done."
+        );
+        expect(
+            `"${structuredPath}" has "- inserted by verify:write" as the last line under Actions, ` +
+                `above the Attendees heading.`
+        );
+
+        // --- Setting properties across several notes --------------------------
+
+        console.log(heading("Setting properties across several notes"));
+        const batchPaths = [`${FOLDER}/batch-a.md`, `${FOLDER}/batch-b.md`, `${FOLDER}/batch-c.md`];
+        const bodies = new Map<string, string>();
+
+        for (const [index, path] of batchPaths.entries()) {
+            // One already carries the property, with a different value, so the
+            // plan has an overwrite to mark notable as well as two additions.
+            const front = index === 0 ? `---\nstatus: active\n---\n\n` : `---\ntags:\n  - check\n---\n\n`;
+            const body = `${front}Body of ${path}, which must survive untouched.\n`;
+            bodies.set(path, body);
+            await executor.write({ path, content: text(body), expectedRev: null });
+            created.push(path);
+        }
+
+        // Composed the way plan_set_properties composes it: read each note
+        // fresh, edit its frontmatter, and carry the revision it was read at.
+        const operations = [];
+        for (const path of batchPaths) {
+            const entry = await executor.currentEntry(path);
+            const current = (await verifier.text(await executor.idFor(path), ctx)) as string;
+            const edit = editFrontmatter(path, current, { set: { status: "checked" } });
+            operations.push({
+                kind: "write" as const,
+                path,
+                content: text(edit.text),
+                expectedRev: entry?._rev ?? null,
+                summary: edit.changed.length > 0 ? "overwrites status (to checked)" : "adds status = checked",
+                notable: edit.changed.length > 0,
+            });
+        }
+
+        const batchPlan = await executor.plan(operations);
+        check(batchPlan.changes.length === 3, `Planned 3 change(s): ${describeTotals(batchPlan.totals)}`);
+        check(
+            batchPlan.changes.filter((change) => change.notable).length === 1,
+            "One change is marked as replacing an existing value, two as additions",
+            "The plan cannot tell an overwrite from an addition, so the review cannot either."
+        );
+
+        // Printed rather than asserted. Whether a plan is reviewable is a
+        // judgement a person makes by looking at one, and this is the only
+        // place in the process where a real plan against real notes exists.
+        console.log(heading("The plan, as a person would see it"));
+        for (const line of renderPlan(batchPlan, { commitTool: "commit_plan" }).split("\n")) {
+            console.log(info(line));
+        }
+
+        const batchCommitted = await executor.commit(batchPlan.id);
+        check(batchCommitted.applied.length === 3, "Committed all three");
+
+        let bodiesIntact = true;
+        for (const path of batchPaths) {
+            const after = (await verifier.text(await executor.idFor(path), ctx)) as string;
+            if (!after.includes("status: checked")) bodiesIntact = false;
+            if (!after.endsWith(`Body of ${path}, which must survive untouched.\n`)) bodiesIntact = false;
+        }
+        check(
+            bodiesIntact,
+            "Every note carries status: checked, and every body is unchanged",
+            "A property edit rewrote something other than the frontmatter."
+        );
+        check(
+            ((await verifier.text(await executor.idFor(batchPaths[1] as string), ctx)) as string).includes(
+                "- check"
+            ),
+            "The properties that were already there survived the edit",
+            "Editing one property rewrote the others, which is what a round trip through a plain " +
+                "object does."
+        );
+        expect(`The three "${FOLDER}/batch-*.md" notes all have status: checked, bodies unchanged.`);
+
+        // --- A plan composed from a stale read --------------------------------
+        //
+        // Distinct from the stale plan above. That one moved after planning;
+        // this one moved between the tool reading the note and the plan
+        // recording a revision. Without the check, planning would record the
+        // newer revision, commit would be accepted, and the other write would
+        // be silently overwritten.
+
+        console.log(heading("Refusing a plan composed from a stale read"));
+        const racedPath = batchPaths[0] as string;
+        const readAt = (await executor.currentEntry(racedPath))?._rev as string;
+        await executor.write({
+            path: racedPath,
+            content: text(`${bodies.get(racedPath) as string}\nChanged by another device.\n`),
+            expectedRev: readAt,
+        });
+
+        const racedRefusal = await executor
+            .plan([
+                {
+                    kind: "write",
+                    path: racedPath,
+                    content: text("composed from a read that is now stale\n"),
+                    expectedRev: readAt,
+                },
+            ])
+            .then(() => undefined)
+            .catch((error: Error) => error);
+
+        check(
+            racedRefusal instanceof PlanStaleError,
+            "Planning refuses content composed from a revision that has since moved"
+        );
+        check(
+            ((await verifier.text(await executor.idFor(racedPath), ctx)) as string).includes(
+                "Changed by another device."
+            ),
+            "The other device's write survived",
+            "The plan overwrote a change it never saw, which is the failure this check exists for."
+        );
+
+        // --- Where daily notes would go ---------------------------------------
+        //
+        // Read-only, and the most useful thing in this script for a vault that
+        // is not this scratch one: it says what append_daily would infer from
+        // the filenames actually present. A wrong inference creates notes in a
+        // folder nobody opens, which looks exactly like notes never created.
+
+        console.log(heading("Where daily notes would go"));
+        if (settings.usePathObfuscation) {
+            console.log(
+                warn("Path obfuscation is on, so document IDs are not paths. Inference not attempted.")
+            );
+        } else {
+            const all = await replicator.database.allDocs({});
+            const paths = all.rows
+                .map((row) => String(row.id))
+                .filter((id) => id.toLowerCase().endsWith(".md") && !id.startsWith("_"));
+
+            const inferred = inferDailyFormat(paths);
+            if (!inferred) {
+                console.log(
+                    warn(
+                        `No folder here holds two or more date-shaped filenames, so append_daily would ` +
+                            `refuse and ask for DAILY_NOTE_PATH. Expected on a scratch database; check ` +
+                            `this against the real vault before relying on it.`
+                    )
+                );
+            } else {
+                const zone = hostTimeZone();
+                const today = fillTemplate(inferred.template, civilDateIn(zone, Date.now()));
+                console.log(ok(`Would infer "${inferred.template}" from ${inferred.matches} note(s)`));
+                console.log(info(`e.g. ${inferred.examples.slice(0, 3).join(", ")}`));
+                console.log(info(`Today, in ${zone}, that is "${today}"`));
+                if (inferred.assumedDayFirst) {
+                    console.log(
+                        warn(
+                            "Nothing in those filenames settles day-first against month-first, so " +
+                                "day-first was assumed. Set DAILY_NOTE_PATH if that is wrong."
+                        )
+                    );
+                }
+                if (inferred.alternatives.length > 0) {
+                    console.log(
+                        warn(
+                            `Other folders also hold dated notes: ` +
+                                `${inferred.alternatives.map((a) => `${a.folder || "the vault root"} (${a.matches})`).join(", ")}. ` +
+                                `If the wrong one won, set DAILY_NOTE_PATH.`
+                        )
+                    );
+                }
+            }
+        }
+
+        // The write itself goes to a dated note inside the scratch folder,
+        // under an explicit template. Writing into whatever folder inference
+        // picked would put this script's output in the middle of real notes,
+        // which is exactly what FOLDER exists to prevent.
+        console.log(heading("Appending to a dated note"));
+        const dailyTemplate = `${FOLDER}/daily/YYYY-MM-DD.md`;
+        const dailyPath = fillTemplate(dailyTemplate, civilDateIn(hostTimeZone(), Date.now()));
+
+        const firstCapture = appendUnderHeading("", "Log", "- first capture");
+        const dailyCreate = await executor.write({
+            path: dailyPath,
+            content: text(firstCapture.text),
+            expectedRev: null,
+        });
+        created.push(dailyPath);
+
+        const secondCapture = appendUnderHeading(firstCapture.text, "Log", "- second capture");
+        const dailyAppend = await executor.write({
+            path: dailyPath,
+            content: text(secondCapture.text),
+            expectedRev: dailyCreate.rev,
+        });
+
+        check(firstCapture.headingCreated, `Created the "Log" heading in a note that had none`);
+        check(!secondCapture.headingCreated, "Reused it for the second capture");
+        check(
+            (await verifier.text(dailyAppend.id, ctx)) === "## Log\n\n- first capture\n\n- second capture\n",
+            "Two captures land under one heading, in order",
+            "A second capture into a fresh daily note is the commonest thing this tool will ever do."
+        );
+        expect(`"${dailyPath}" exists, with both captures listed under a "Log" heading.`);
+
         // --- The replica ----------------------------------------------------
 
         console.log(heading("The local replica"));
@@ -485,7 +741,7 @@ async function main() {
         })) as { _conflicts?: string[] };
         check(
             (replicated._conflicts ?? []).length === 0,
-            "No conflict branches after six writes",
+            "No conflict branches after every write in this run",
             `The replica holds ${(replicated._conflicts ?? []).length} conflicting revision(s). ` +
                 `The revision ancestry on the replica patch is wrong.`
         );

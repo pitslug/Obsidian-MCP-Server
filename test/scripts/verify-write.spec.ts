@@ -152,13 +152,59 @@ describe("a full run", () => {
     });
 
     it("leaves the local replica without conflict branches", () => {
-        expect(result.out).toContain("No conflict branches after six writes");
+        expect(result.out).toContain("No conflict branches after every write in this run");
+    });
+
+    it("inserts in the middle of a note without disturbing the rest of it", () => {
+        // The one case where chunk reuse has something to get wrong: every
+        // other edit in the run appends at the end.
+        expect(result.out).toContain('Found the "Actions" section rather than creating one');
+        expect(result.out).toContain("An insertion in the middle of a note reads back byte-identical");
+        expect(result.out).toContain("The new line landed at the end of the section, above the next heading");
+    });
+
+    it("sets a property across several notes without touching their bodies", () => {
+        expect(result.out).toContain("Planned 3 change(s)");
+        expect(result.out).toContain("One change is marked as replacing an existing value");
+        expect(result.out).toContain("Committed all three");
+        expect(result.out).toContain("Every note carries status: checked, and every body is unchanged");
+        expect(result.out).toContain("The properties that were already there survived the edit");
+    });
+
+    it("prints the plan the way a person would review it", () => {
+        // The rendering is the reviewable artifact, and whether it reads well
+        // is a judgement made by looking at a real one. The script prints it
+        // for that reason, so this checks it actually did.
+        expect(result.out).toContain("The plan, as a person would see it");
+        expect(result.out).toContain("This plan will change 3 note(s)");
+        expect(result.out).toContain("Replaces or removes existing content (1, all listed)");
+        expect(result.out).toContain("overwrites status (to checked)");
+    });
+
+    it("refuses a plan composed from a read that went stale while planning", () => {
+        expect(result.out).toContain(
+            "Planning refuses content composed from a revision that has since moved"
+        );
+        expect(result.out).toContain("The other device's write survived");
+    });
+
+    it("reports where daily notes would go", () => {
+        expect(result.out).toContain("Where daily notes would go");
+    });
+
+    it("appends twice under one heading in a fresh daily note", () => {
+        expect(result.out).toContain('Created the "Log" heading in a note that had none');
+        expect(result.out).toContain("Reused it for the second capture");
+        expect(result.out).toContain("Two captures land under one heading, in order");
     });
 
     it("tells the human exactly what to look for in Obsidian", () => {
         expect(result.out).toContain("Now confirm it in Obsidian");
         expect(result.out).toMatch(/mcp-write-check\/first\.md/);
         expect(result.out).toMatch(/mcp-write-check\/second\.md/);
+        expect(result.out).toMatch(/mcp-write-check\/structured\.md/);
+        expect(result.out).toMatch(/mcp-write-check\/batch-\*\.md/);
+        expect(result.out).toMatch(/mcp-write-check\/daily\/\d{4}-\d{2}-\d{2}\.md/);
     });
 
     it("actually left the notes there, since --keep was passed", async () => {
@@ -175,7 +221,13 @@ describe("cleaning up after itself", () => {
         const result = await runScript(["--url", couch.url, "--db", db]);
         expect(result.code).toBe(0);
 
-        const first = await couch.get(db, "mcp-write-check/first.md");
-        expect(first === undefined || first._deleted === true).toBe(true);
+        for (const path of [
+            "mcp-write-check/first.md",
+            "mcp-write-check/structured.md",
+            "mcp-write-check/batch-a.md",
+        ]) {
+            const doc = await couch.get(db, path);
+            expect(doc === undefined || doc._deleted === true).toBe(true);
+        }
     }, 180_000);
 });

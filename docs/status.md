@@ -10,7 +10,7 @@ progress against it and the things you would otherwise have to rediscover.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 579 tests, ~80s
+npm test          # 585 tests, ~70s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -152,8 +152,11 @@ In rough order:
 
 2. **Re-run the gate.** The write path changed, so `npm run verify:write`
    against `obsidian-writetest` is owed before anything points at `obsidiandb`.
-   It does not yet exercise the batch tools or `append_daily`; adding them to it
-   is part of this step rather than a separate one.
+   It now covers the whole surface: insertion under a heading, property setting
+   across several notes, a plan composed from a stale read, and two captures
+   into a fresh daily note. It also prints the rendered plan and what daily note
+   template it would infer, both of which are there to be looked at rather than
+   asserted.
 
 Smaller things worth doing at some point:
 
@@ -389,8 +392,28 @@ It creates a note, edits it reusing chunks, refuses a stale write, plans and
 commits a batch, refuses a stale plan, soft-deletes, writes over the tombstone,
 and reads every result back out of CouchDB through the vault model rather than
 through its own client or the replica. It checks the local replica for conflict
-branches. Everything it makes lives under `mcp-write-check/`, and without
-`--keep` it removes it again on the way out.
+branches.
+
+It then covers the rest of the write surface. **Inserting under a heading** is
+the one worth understanding: every other edit in the run appends at the end,
+where chunk reuse has nothing to get wrong. An insertion in the middle shifts
+every chunk after it, and a splitter reusing the wrong ones produces a note that
+assembles into plausible nonsense rather than failing. **Setting a property
+across three notes** proves the frontmatter edit leaves bodies and neighbouring
+properties alone, which a round trip through a plain object would not. And it
+refuses a **plan composed from a read that went stale while planning**, which is
+a different window from the stale plan above and the one nobody is watching.
+
+Two things it prints rather than asserts, because both are judgements:
+
+- **The rendered plan**, exactly as `plan_set_properties` would return it.
+  Whether a plan is reviewable is something you find out by looking at a real
+  one, and this is the only place in the process where a real one exists.
+- **What daily note template it would infer**, read-only, from the filenames
+  actually in the database. Worth running against a copy of the real vault for
+  this alone: a wrong inference files captures in a folder nobody opens, which
+  looks exactly like captures that were never made. Everything it makes lives under `mcp-write-check/`, and without
+  `--keep` it removes it again on the way out.
 
 `--keep` is what you want the first time, because the human half is looking at
 those notes. The script finishes by printing exactly what should appear in
