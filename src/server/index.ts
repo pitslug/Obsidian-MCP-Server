@@ -194,6 +194,16 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         // Used by the container healthcheck. Deliberately not authenticated,
         // and deliberately says nothing about the vault.
         health: { enabled: true, path: "/health", message: "ok", status: 200 },
+
+        // Roots are a client telling a server which directories are in scope.
+        // This server addresses notes by vault path against CouchDB, so there
+        // is nothing for a root to scope, and asking costs something: FastMCP
+        // sends `roots/list` whenever the client advertises the capability, and
+        // a client that advertises it without answering leaves the request
+        // pending until it times out, logging a stack trace per session.
+        // Claude's connector does exactly that. Declining the capability is
+        // honest as well as quieter: we would ignore the answer.
+        roots: { enabled: false },
     });
 
     const toolContext = {
