@@ -149,8 +149,14 @@ In rough order:
 
 1. **Deploy.** `deploy/README.md` is the runbook and it is current: the
    Pocket-ID prerequisites, the exact env values, the curl checks that catch a
-   broken handshake, and a four-step order for turning writes on. The container
-   has still never been built on the server.
+   broken handshake, and a four-step order for turning writes on. The image is
+   built by CI rather than on the server, so the first deploy is a pull. It has
+   still never been run there.
+
+    Two things to do once, in that order: make the GHCR package public (it
+    starts private even for a public repository, and a private one fails the
+    first pull with a 401 that reads like a missing image), and tag `v0.1.0` so
+    the compose file can pin `:0.1` instead of tracking `:edge`.
 
 2. **Re-run the gate.** The write path changed, so `npm run verify:write`
    against `obsidian-writetest` is owed before anything points at `obsidiandb`.

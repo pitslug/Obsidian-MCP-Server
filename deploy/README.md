@@ -48,8 +48,27 @@ Nothing here holds an OAuth credential.
 
 ## Steps
 
-1. Put a checkout of the repository somewhere on the server, and point
-   `$OBSIDIAN_MCP_SRC` at it.
+1. Make sure the image exists and the server can pull it.
+
+    `.github/workflows/docker-publish.yml` builds and pushes to GHCR on every
+    push to `main`, same as `onenote-mcp`. Nothing is checked out on the server.
+
+    **GHCR packages start private even when the repository is public.** Set
+    `ghcr.io/pitslug/obsidian-mcp-server` to public in the package settings, or
+    the first `docker compose pull` fails with a 401 that reads like a missing
+    image. The alternative is a `docker login ghcr.io` on the server with a
+    read:packages token, which is one more credential to keep.
+
+    The compose file pulls `:edge`, which is whatever is on `main`. Once the
+    work is settled, tag a release and pin to it:
+
+    ```bash
+    git tag v0.1.0 && git push --tags
+    ```
+
+    That produces `:0.1.0`, `:0.1`, `:0` and `:latest`. Pin to `:0.1` in the
+    compose file: this service holds transcriptions nothing can recompute, and
+    the stack pins stateful services for exactly that reason.
 
 2. Create the secret:
 
@@ -83,14 +102,17 @@ Nothing here holds an OAuth credential.
 
     ```
     OBSIDIAN_MCP_PORT=8095
-    OBSIDIAN_MCP_SRC=/mnt/user/appdata/src/obsidian-mcp-server
     ```
+
+    `$OBSIDIAN_MCP_SRC` is only needed if you uncomment the `build:` block to
+    build locally instead of pulling.
 
 5. Copy `compose/obsidian-mcp.yml` into `compose/`, add the `include:` line to
    `slugworx-docker.yml`, then:
 
     ```bash
-    docker compose -f slugworx-docker.yml up -d --build obsidian-mcp
+    docker compose -f slugworx-docker.yml pull obsidian-mcp
+    docker compose -f slugworx-docker.yml up -d obsidian-mcp
     ```
 
 6. Watch the first replication:
@@ -164,6 +186,13 @@ generates.
 
 Stopping the container removes nothing, and while `READ_ONLY=true` it has never
 written to CouchDB. Devices carry on exactly as before.
+
+To go back a version rather than stop, every build is tagged with its commit,
+so there is always something exact to pin to:
+
+```bash
+docker compose -f slugworx-docker.yml pull obsidian-mcp   # after editing the tag
+```
 
 ```bash
 docker compose -f slugworx-docker.yml stop obsidian-mcp

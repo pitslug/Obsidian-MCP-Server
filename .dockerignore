@@ -1,0 +1,32 @@
+# Keep the build context small.
+#
+# The Dockerfile copies only what it names, so nothing here could reach the
+# image anyway. What this prevents is the whole directory being handed to the
+# daemon first: on a machine that has run the tests, that means node_modules, a
+# PouchDB replica and a set of SQLite stores, which is hundreds of megabytes
+# sent over a socket to be thrown away. It costs nothing in CI, where the
+# checkout is clean, and a great deal when building locally from the `build:`
+# fallback in the compose file.
+#
+# Anything holding real vault data is also listed, so no future COPY can pick
+# one up by accident.
+
+node_modules/
+dist/
+coverage/
+.git/
+.github/
+
+# Scratch and derived data, some of which is a copy of the vault.
+/tmp/
+/data/
+/fixtures/private/
+*.sqlite
+*.log
+
+# Never in an image.
+.env
+.env.*
+!.env.example
+
+.DS_Store

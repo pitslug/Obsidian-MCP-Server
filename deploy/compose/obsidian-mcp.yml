@@ -3,10 +3,17 @@ services:
 # Obsidian MCP - reads the LiveSync vault straight from CouchDB and serves it over MCP
   obsidian-mcp:
     container_name: obsidian-mcp
-    image: obsidian-mcp:latest
-    build:
-      context: $OBSIDIAN_MCP_SRC              # checkout of pitslug/Obsidian-MCP-Server
-      dockerfile: Dockerfile
+    # Built and published by .github/workflows/docker-publish.yml, same as
+    # onenote-mcp. Comment `image:` and uncomment `build:` to build locally
+    # from a checkout instead.
+    #
+    # :edge is whatever is on main. Move to a pinned :0.1 once v0.1.0 is
+    # tagged: this service holds transcripts that nothing can recompute, which
+    # is the stack's own reason for pinning stateful services.
+    image: ghcr.io/pitslug/obsidian-mcp-server:edge
+    # build:
+    #   context: $OBSIDIAN_MCP_SRC            # checkout of pitslug/Obsidian-MCP-Server
+    #   dockerfile: Dockerfile
     restart: always
     security_opt:
       - no-new-privileges:true
