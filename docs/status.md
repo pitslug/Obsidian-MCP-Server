@@ -33,10 +33,10 @@ environment, or from Docker secrets in deployment. This repo is public.
 | Tools            | Thirteen read tools, plus eight write tools registered only when `READ_ONLY=false`                               |
 | Write executor   | Built and tested: single-note writes, deletes, and the plan/commit protocol. Both halves now have a tool surface |
 | Daily notes      | Path template inferred from the vault's own dated filenames, overridable, resolved in a configured time zone     |
-| Acceptance gate  | Met. All three steps passed as of 28 July 2026                                                                   |
-| Transport        | stdio and streamable HTTP, bearer token                                                                          |
-| Deployment       | Dockerfile and Compose for the Slugworx stack, not yet deployed                                                  |
-| OAuth 2.0 + PKCE | Not started, bearer token in the interim                                                                         |
+| Acceptance gate  | Met. Step three re-run end to end against `obsidian-writetest` on 29 July 2026, and confirmed in Obsidian         |
+| Transport        | stdio and streamable HTTP                                                                                        |
+| Deployment       | Dockerfile, Compose, and an image CI publishes to GHCR. Never yet run on the server                              |
+| OAuth 2.1        | Resource server against Pocket-ID: audience-bound tokens, scopes at the tool boundary. Not yet exercised live    |
 
 Thirteen read tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
 `property_inventory`, `find_by_property`, `tag_inventory`, `find_by_tag`,
@@ -143,6 +143,12 @@ revision back out of CouchDB after a transcription is saved.
    the replica. Confirmed by eye in Obsidian afterwards. See "Re-running the
    gate" for how to repeat it.
 
+    Re-run in full on 29 July 2026 against the same database, on the four
+    commits pushed that day, and confirmed in Obsidian again. It covers more
+    than it did the first time: insertion under a heading, properties across
+    several notes, a plan composed from a read that went stale while planning,
+    and two captures into a fresh daily note.
+
 ## What to do next
 
 In rough order:
@@ -182,11 +188,6 @@ Smaller things worth doing at some point:
   text as the description. This happened once, from a header builder that
   refused to quote a string containing a quote. `test/integration/oauth.spec.ts`
   asserts the exact challenge for that reason.
-- A `.gitattributes` (`* text=auto eol=crlf`) would stop the LF/CRLF warning on
-  every file touched from a Linux machine. Worth doing: without it, a checkout
-  on Windows shows every tracked file as modified when the same working tree is
-  read from a Linux mount, which makes `git status` useless for seeing real
-  work.
 - The batch path only sets properties. Batch renaming, moving and retagging are
   the obvious next selections, and all three need the same thing the property
   one needed: a summary line a reviewer can read.
@@ -370,6 +371,16 @@ server with `READ_ONLY=false`.
   counterexample `["%="]` on about one run in ten while CI stayed green on the
   same commit. That is the argument for running the suite rather than reading the
   badge.
+- **`git pull` can fetch without merging, and then say nothing.** Moving between
+  the work machine and this one on 29 July 2026, the pull fetched `d3a95e0` and
+  left `main` at `ca94d0e`, four commits back, because four locally modified
+  files blocked the merge. Three had been rewritten upstream in the meantime, so
+  that work was stranded rather than merely behind, and nothing said so again
+  after the first attempt. `git log --oneline HEAD..FETCH_HEAD` answers it in one
+  line. The `.gitattributes` added at the same time is the other half of it:
+  without one the working tree was CRLF against an LF index, `git status`
+  reported every tracked file as modified, and the four that really were modified
+  were invisible in the noise.
 
 ## Re-running the gate
 
