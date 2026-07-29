@@ -86,6 +86,22 @@ describe("refusing to run", () => {
         expect(result.out).toContain("No database name");
     }, 120_000);
 
+    it("refuses a database no device has published settings to", async () => {
+        // What a replicated copy looks like: every document present, and no
+        // milestone, because that is a _local document and does not replicate.
+        // Writing here would compose with default chunk parameters and slice
+        // every attachment at 100 KiB, unlike everything already in the vault.
+        const db = nextDb("nosettings");
+        await couch.createDatabase(db);
+
+        const result = await runScript(["--url", couch.url, "--db", db]);
+
+        expect(result.code).toBe(1);
+        expect(result.out).toContain("No device has published settings");
+        expect(result.out).toContain("does not replicate");
+        expect(await couch.get(db, "mcp-write-check/first.md")).toBeUndefined();
+    }, 120_000);
+
     it("refuses a database several devices have synced to", async () => {
         const db = nextDb("busy");
         await couch.createDatabase(db);

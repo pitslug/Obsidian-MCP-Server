@@ -165,9 +165,23 @@ const warn = (s: string) => `  [33m![0m ${s}`;
 const info = (s: string) => `    ${s}`;
 const heading = (s: string) => `\n[1m${s}[0m`;
 
-/** Everything the human is asked to confirm in Obsidian, collected as it goes. */
-const expectations: string[] = [];
-const expect = (s: string) => expectations.push(s);
+/**
+ * What the human is asked to look at, in two kinds.
+ *
+ * `expectFinal` is state that is still true when the script exits, and is
+ * therefore a checklist. `expectAlong` is state that existed partway through
+ * and has since been written over, which is only observable by watching
+ * Obsidian while the run happens.
+ *
+ * Keeping them apart matters. A single list reading "second.md has disappeared"
+ * and "second.md is back" is not a checklist, it is a transcript, and handing
+ * someone a transcript labelled "you should see" wastes their time at exactly
+ * the moment they are trying to decide whether to trust this with their vault.
+ */
+const finalState: string[] = [];
+const alongTheWay: string[] = [];
+const expectFinal = (s: string) => finalState.push(s);
+const expectAlong = (s: string) => alongTheWay.push(s);
 
 // ---------------------------------------------------------------------------
 // Reading back, independently of the executor
@@ -259,18 +273,37 @@ async function main() {
 
     const nodes = milestone?.accepted_nodes ?? [];
     console.log(ok(`Writing to "${options.couch.database}", which ${nodes.length} device(s) have synced`));
-    if (nodes.length === 0) {
-        console.log(
-            warn(
-                "No device has synced to this database yet. The write path will still be verified, " +
-                    "but the half of this that matters is seeing the result in Obsidian."
-            )
-        );
-    }
 
     // --- Settings, read from the database itself ----------------------------
 
-    const { settings: published, conflicts } = readTweakValues(milestone);
+    const { settings: published, conflicts, nodeCount } = readTweakValues(milestone);
+
+    // A database no device has published settings to is not a database this
+    // may write to, and the reason is not obvious enough to leave as a warning.
+    //
+    // Settings live in the milestone document, which is a `_local` document,
+    // and `_local` documents do not replicate. So a scratch database made by
+    // copying a real one arrives with none, and every setting falls back to a
+    // default. `customChunkSize` defaulting to 0 turns `absoluteMaxPieceSize`
+    // into 100 KiB, which is below the 256 KiB unit the binary path uses, so
+    // every attachment gets sliced at exactly 100 KiB while text is unaffected
+    // (its own maximum is 1 KiB, far below the cap either way).
+    //
+    // The result is a write that succeeds, reads back correctly, and is chunked
+    // unlike every other document in the vault. Nothing downstream would notice,
+    // and the test would have proved the opposite of what it set out to.
+    if (nodeCount === 0) {
+        fail(
+            `No device has published settings to "${options.couch.database}", so the vault's own ` +
+                `chunk parameters are unknown and this would write with defaults.\n\n` +
+                `  If you made this database by replicating another one, that is expected: the ` +
+                `milestone document is a _local document and does not replicate.\n\n` +
+                `  Point one Obsidian instance at this database and let it sync, then run this again. ` +
+                `Confirm with:\n` +
+                `    npm run verify -- --url '...' --db ${options.couch.database}`
+        );
+    }
+
     for (const [key, values] of Object.entries(conflicts)) {
         fail(
             `Devices disagree on "${key}": ${values.map((v) => JSON.stringify(v)).join(", ")}. ` +
@@ -354,7 +387,7 @@ async function main() {
             "Reads back byte-identical from CouchDB",
             "The note was written but does not reassemble to what was sent."
         );
-        expect(`"${notePath}" exists and opens, ending in "Line 79, ...".`);
+        expectAlong(`"${notePath}" appears, ending in "Line 79, ...".`);
 
         // --- Edit, reusing chunks ------------------------------------------
 
@@ -377,7 +410,7 @@ async function main() {
             "The edit reads back correctly, including the reused chunks",
             "This is the failure that matters: a reused chunk is missing or wrong upstream."
         );
-        expect(`"${notePath}" now ends with "Appended by the second write."`);
+        expectAlong(`"${notePath}" gains "Appended by the second write."`);
 
         // --- A stale write is refused --------------------------------------
 
@@ -422,8 +455,8 @@ async function main() {
                 "# Second\n\nCreated by a committed plan.\n",
             "The note the plan created reads back correctly"
         );
-        expect(`"${secondPath}" exists, containing "Created by a committed plan."`);
-        expect(`"${notePath}" now also ends with "Added by a committed plan."`);
+        expectAlong(`"${secondPath}" appears, containing "Created by a committed plan."`);
+        expectFinal(`"${notePath}" ends with "Added by a committed plan."`);
 
         // --- A stale plan is refused ----------------------------------------
 
@@ -450,7 +483,7 @@ async function main() {
                 "# Second\n\nEdited by something else entirely.\n",
             "The refused plan changed nothing"
         );
-        expect(`"${secondPath}" says "Edited by something else entirely."`);
+        expectAlong(`"${secondPath}" changes to "Edited by something else entirely."`);
 
         // --- Delete and undelete --------------------------------------------
 
@@ -468,7 +501,7 @@ async function main() {
             tombstone?._deleted === undefined,
             "It is not hard-deleted, so the record other devices reconcile against remains"
         );
-        expect(`"${secondPath}" has disappeared from the vault.`);
+        expectAlong(`"${secondPath}" disappears from the vault.`);
 
         console.log(heading("Writing over the deleted note"));
         const revived = await executor.write({
@@ -486,7 +519,7 @@ async function main() {
             (await verifier.text(revived.id, ctx)) === "# Second, again\n\nWritten over a tombstone.\n",
             "The revived note reads back correctly"
         );
-        expect(`"${secondPath}" is back, saying "Written over a tombstone."`);
+        expectFinal(`"${secondPath}" is back, saying "Written over a tombstone."`);
 
         // --- Appending under a heading ---------------------------------------
         //
@@ -529,7 +562,7 @@ async function main() {
             "The new line landed at the end of the section, above the next heading",
             "It went somewhere else in the note, which is what appending to the end would have done."
         );
-        expect(
+        expectFinal(
             `"${structuredPath}" has "- inserted by verify:write" as the last line under Actions, ` +
                 `above the Attendees heading.`
         );
@@ -605,7 +638,7 @@ async function main() {
             "Editing one property rewrote the others, which is what a round trip through a plain " +
                 "object does."
         );
-        expect(`The three "${FOLDER}/batch-*.md" notes all have status: checked, bodies unchanged.`);
+        expectFinal(`The three "${FOLDER}/batch-*.md" notes all have status: checked, bodies unchanged.`);
 
         // --- A plan composed from a stale read --------------------------------
         //
@@ -731,7 +764,7 @@ async function main() {
             "Two captures land under one heading, in order",
             "A second capture into a fresh daily note is the commonest thing this tool will ever do."
         );
-        expect(`"${dailyPath}" exists, with both captures listed under a "Log" heading.`);
+        expectFinal(`"${dailyPath}" exists, with both captures listed under a "Log" heading.`);
 
         // --- The replica ----------------------------------------------------
 
@@ -777,14 +810,36 @@ async function main() {
 
     console.log(ok("\nEvery check passed."));
     console.log(heading("Now confirm it in Obsidian"));
+
+    if (!options.keep) {
+        console.log(
+            info(
+                "Everything above was removed on the way out, so there is nothing left to look at. " +
+                    "Run again with --keep to leave it in place."
+            )
+        );
+        return;
+    }
+
+    console.log(info(`In the vault synced to "${options.couch.database}", ${FOLDER}/ should contain:`));
+    for (const line of finalState) console.log(info(`  - ${line}`));
     console.log(
         info(
-            options.keep
-                ? "With the Obsidian instance synced to this database, you should see:"
-                : "Run again with --keep, then in the Obsidian instance synced to this database:"
+            `\nAnd nothing else. Every one of them readable, and ending as described. ` +
+                `If a note is empty, truncated, or full of what looks like base64, that is the ` +
+                `failure this whole gate exists to catch.`
         )
     );
-    for (const line of expectations) console.log(info(`  - ${line}`));
+
+    console.log(info("\nThese happened along the way and are no longer visible:"));
+    for (const line of alongTheWay) console.log(info(`  - ${line}`));
+    console.log(
+        info(
+            "Worth watching live if you re-run with Obsidian open, since a note appearing, " +
+                "changing, vanishing and returning is the clearest sign the vault is really syncing."
+        )
+    );
+
     console.log(
         info(
             "\nThat is the half of gate step three this script cannot do for you. Until you have " +
