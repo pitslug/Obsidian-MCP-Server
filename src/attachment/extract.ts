@@ -87,7 +87,15 @@ export async function extractPdf(bytes: Uint8Array): Promise<ExtractionResult> {
     try {
         // A copy, because the PDF machinery transfers the buffer it is given
         // and the caller may still need theirs.
-        const doc = await getDocumentProxy(new Uint8Array(bytes));
+        //
+        // `verbosity: 0` is ERRORS-only. Left at its default, pdf.js writes a
+        // warning to stderr for every font it substitutes and every optional
+        // feature the running V8 lacks: a single vault of scanned PDFs produces
+        // hundreds of lines of "Math.sumPrecise is not a function" that mean
+        // nothing, extract nothing differently, and bury the log lines that do
+        // matter. Errors still come through, and the outcomes this function
+        // returns are what actually report a PDF it could not read.
+        const doc = await getDocumentProxy(new Uint8Array(bytes), { verbosity: 0 });
         const { totalPages, text } = await extractText(doc, { mergePages: true });
 
         const merged = (Array.isArray(text) ? text.join("\n\n") : text).replace(/\s+\n/g, "\n").trim();
