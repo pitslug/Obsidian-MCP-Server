@@ -18,6 +18,7 @@ import {
     HashAlgorithms,
     type VaultFormatSettings,
 } from "./vault-model/index.js";
+import { hostTimeZone, templateIsComplete } from "./note/daily.js";
 
 export class ConfigError extends Error {
     constructor(message: string) {
@@ -111,6 +112,27 @@ export interface Config {
     /** Maximum notes a single plan may touch. */
     planCeiling: number;
 
+    /**
+     * Path template for the daily note, e.g. `daily/YYYY-MM-DD.md`.
+     *
+     * Left unset, the format is inferred from the dated filenames already in
+     * the vault, which is usually right and is always reported. Obsidian keeps
+     * the real setting in `.obsidian/`, a hidden file this vault does not sync,
+     * so there is nothing authoritative to read and this is the override for
+     * when the inference has nothing to work from or picks the wrong folder.
+     */
+    dailyNotePath: string | undefined;
+
+    /**
+     * The zone whose civil date "today" means.
+     *
+     * Defaults to the host's zone, which is right on a laptop and wrong in a
+     * container, where it is UTC. Ten hours separate UTC from the vault owner,
+     * so an unset value in deployment files every evening's capture under the
+     * previous day.
+     */
+    timeZone: string;
+
     transport: {
         kind: "stdio" | "http";
         host: string;
@@ -128,6 +150,29 @@ export interface Config {
     };
 
     logLevel: "debug" | "info" | "warn" | "error";
+}
+
+/**
+ * The daily note override, checked at startup rather than at first use.
+ *
+ * A template missing its day is not a daily note template, and left unchecked
+ * it would resolve to the same path every day and quietly append a month of
+ * captures into one note. Failing at startup means it is found by whoever set
+ * it, while they are still looking at it.
+ */
+function dailyNotePath(): string | undefined {
+    const template = env("DAILY_NOTE_PATH");
+    if (template === undefined) return undefined;
+    if (!templateIsComplete(template)) {
+        throw new ConfigError(
+            `DAILY_NOTE_PATH is "${template}", which does not name a single day. It needs a year, ` +
+                `a month and a day: YYYY, MM (or MMM/MMMM) and DD. For example "daily/YYYY-MM-DD.md".`
+        );
+    }
+    if (!template.toLowerCase().endsWith(".md")) {
+        throw new ConfigError(`DAILY_NOTE_PATH is "${template}", which does not end in .md.`);
+    }
+    return template;
 }
 
 export function loadConfig(): Config {
@@ -174,6 +219,8 @@ export function loadConfig(): Config {
         readOnly,
         attachmentSizeCap: integer("ATTACHMENT_SIZE_CAP", 25 * 1024 * 1024),
         planCeiling: integer("PLAN_CEILING", 500),
+        dailyNotePath: dailyNotePath(),
+        timeZone: env("VAULT_TIMEZONE") ?? hostTimeZone(),
         transport: {
             kind,
             host: env("MCP_HOST", "0.0.0.0") as string,

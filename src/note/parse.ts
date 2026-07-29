@@ -59,7 +59,7 @@ const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n?---(?:\r?\n|$)/;
  * containing `#comment` becomes a tag, and every vault picks up junk tags
  * from its own documentation.
  */
-function maskNonContent(text: string): string {
+export function maskNonContent(text: string): string {
     return (
         text
             // Fenced code blocks, ``` or ~~~, keeping newlines so offsets and

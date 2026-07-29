@@ -291,3 +291,50 @@ describe("schema versioning", () => {
         reopened.close();
     });
 });
+
+describe("notesUnder", () => {
+    it("returns everything when no folder is given", () => {
+        index.put(note("a.md", "one"));
+        index.put(note("deep/b.md", "two"));
+
+        expect(index.notesUnder().map((n) => n.path)).toEqual(["a.md", "deep/b.md"]);
+    });
+
+    it("stops at the folder boundary rather than matching a shared prefix", () => {
+        index.put(note("projects/house.md", "one"));
+        index.put(note("projects/deep/shed.md", "two"));
+        index.put(note("projects-archive/old.md", "three"));
+        index.put(note("projects.md", "four"));
+
+        expect(index.notesUnder("projects").map((n) => n.path)).toEqual([
+            "projects/deep/shed.md",
+            "projects/house.md",
+        ]);
+    });
+
+    it("does not let a wildcard in a folder name widen the match", () => {
+        // LIKE reads `_` as "any character", so an unescaped folder called
+        // `report_2026` would also collect `report-2026`.
+        index.put(note("report_2026/a.md", "one"));
+        index.put(note("report-2026/b.md", "two"));
+
+        expect(index.notesUnder("report_2026").map((n) => n.path)).toEqual(["report_2026/a.md"]);
+    });
+
+    it("includes attachments, leaving it to the caller to decide", () => {
+        index.put(note("files/a.md", "one"));
+        index.put(binary("files/scan.pdf"));
+
+        expect(
+            index
+                .notesUnder("files")
+                .map((n) => n.kind)
+                .sort()
+        ).toEqual(["binary", "text"]);
+    });
+
+    it("tolerates surrounding slashes", () => {
+        index.put(note("projects/house.md", "one"));
+        expect(index.notesUnder("/projects/").map((n) => n.path)).toEqual(["projects/house.md"]);
+    });
+});

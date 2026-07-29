@@ -83,6 +83,8 @@ function configFor(db: string, port: number, overrides: Partial<Config> = {}): C
         readOnly: true,
         attachmentSizeCap: 25 * 1024 * 1024,
         planCeiling: 500,
+        dailyNotePath: undefined,
+        timeZone: "Australia/Brisbane",
         transport: { kind: "http", host: "127.0.0.1", port, bearerToken: TOKEN },
         logLevel: "error",
         ...overrides,

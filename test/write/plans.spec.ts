@@ -210,6 +210,75 @@ describe("planning", () => {
             stack.executor.plan([{ kind: "write", path: "note.md", content: text("x") }])
         ).rejects.toBeInstanceOf(ReadOnlyError);
     }, 60_000);
+
+    it("carries the composing tool's annotations through to the plan", async () => {
+        const stack = await stackFor(nextDb("annotated"));
+        await put(stack.executor, "a.md", text("original"));
+
+        const plan = await stack.executor.plan([
+            {
+                kind: "write",
+                path: "a.md",
+                content: text("changed"),
+                summary: "overwrites status",
+                notable: true,
+            },
+            { kind: "write", path: "b.md", content: text("new"), summary: "adds status" },
+        ]);
+
+        expect(plan.changes.find((c) => c.path === "a.md")).toMatchObject({
+            summary: "overwrites status",
+            notable: true,
+        });
+        expect(plan.changes.find((c) => c.path === "b.md")?.notable).toBeUndefined();
+    }, 60_000);
+
+    it("marks a delete notable whatever the tool said", async () => {
+        const stack = await stackFor(nextDb("delnotable"));
+        await put(stack.executor, "a.md", text("original"));
+
+        const plan = await stack.executor.plan([{ kind: "delete", path: "a.md" }]);
+        expect(plan.changes[0]?.notable).toBe(true);
+    }, 60_000);
+
+    it("refuses to plan content composed from a revision that has since moved", async () => {
+        const stack = await stackFor(nextDb("composewindow"));
+        const first = await put(stack.executor, "a.md", text("original"));
+        await put(stack.executor, "a.md", text("changed by someone else"));
+
+        // The revision a tool would have read a moment before planning. Without
+        // this check the plan would record the newer revision, commit happily,
+        // and lose the other write: the one failure mode the whole revision
+        // discipline exists to prevent, on the path nobody is watching.
+        await expect(
+            stack.executor.plan([
+                { kind: "write", path: "a.md", content: text("from a stale read"), expectedRev: first.rev },
+            ])
+        ).rejects.toBeInstanceOf(PlanStaleError);
+
+        expect(await contentOf(stack.db, "a.md")).toBe("changed by someone else");
+    }, 60_000);
+
+    it("accepts a revision that still matches", async () => {
+        const stack = await stackFor(nextDb("composeok"));
+        const receipt = await put(stack.executor, "a.md", text("original"));
+
+        const plan = await stack.executor.plan([
+            { kind: "write", path: "a.md", content: text("edited"), expectedRev: receipt.rev },
+        ]);
+        await stack.executor.commit(plan.id);
+
+        expect(await contentOf(stack.db, "a.md")).toBe("edited");
+    }, 60_000);
+
+    it("takes null as an assertion that nothing is there yet", async () => {
+        const stack = await stackFor(nextDb("composenull"));
+        await put(stack.executor, "a.md", text("already here"));
+
+        await expect(
+            stack.executor.plan([{ kind: "write", path: "a.md", content: text("x"), expectedRev: null }])
+        ).rejects.toBeInstanceOf(PlanStaleError);
+    }, 60_000);
 });
 
 describe("committing", () => {

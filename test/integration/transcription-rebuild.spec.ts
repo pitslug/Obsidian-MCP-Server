@@ -132,6 +132,8 @@ async function startServer(db: string, run: string, transcriptStore: string): Pr
         readOnly: true,
         attachmentSizeCap: 25 * 1024 * 1024,
         planCeiling: 500,
+        dailyNotePath: undefined,
+        timeZone: "Australia/Brisbane",
         transport: { kind: "http", host: "127.0.0.1", port, bearerToken: TOKEN },
         logLevel: "error",
     };
@@ -188,13 +190,17 @@ describe("a transcription outlives the index", () => {
         // is carried across.
         const second = await startServer(db, `${counter}b`, store);
 
-        const found = textOf(await second.callTool({ name: "search_notes", arguments: { query: "Kingfisher" } }));
+        const found = textOf(
+            await second.callTool({ name: "search_notes", arguments: { query: "Kingfisher" } })
+        );
         expect(found).toContain(INK);
 
         const queue = textOf(await second.callTool({ name: "list_untranscribed", arguments: {} }));
         expect(queue).not.toContain(INK);
 
-        const attachment = textOf(await second.callTool({ name: "get_attachment", arguments: { path: INK } }));
+        const attachment = textOf(
+            await second.callTool({ name: "get_attachment", arguments: { path: INK } })
+        );
         expect(attachment).toContain("Adelaide lease");
         expect(attachment).toMatch(/Source: transcription \(claude-opus-5\)/);
     }, 180_000);
@@ -221,7 +227,9 @@ describe("a transcription outlives the index", () => {
         expect(queue).toContain(INK);
         expect(queue).toContain("transcription out of date");
 
-        const attachment = textOf(await second.callTool({ name: "get_attachment", arguments: { path: INK } }));
+        const attachment = textOf(
+            await second.callTool({ name: "get_attachment", arguments: { path: INK } })
+        );
         // The old text is still served, because a stale reading beats none, but
         // it must not be served as though it were current.
         expect(attachment).toContain("Adelaide lease");

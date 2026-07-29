@@ -1,7 +1,7 @@
 # Where this is up to
 
-Written 28 July 2026, and updated the same day when the write executor landed,
-to pick up on another machine. `docs/design.md` is the plan; this is the
+Written 28 July 2026, and updated as each piece landed: the write executor, the
+single-note tools, then the batch and daily ones. `docs/design.md` is the plan; this is the
 progress against it and the things you would otherwise have to rediscover.
 
 ## Getting a machine ready
@@ -10,7 +10,7 @@ progress against it and the things you would otherwise have to rediscover.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 449 tests, ~70s
+npm test          # 520 tests, ~70s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -22,34 +22,80 @@ environment, or from Docker secrets in deployment. This repo is public.
 
 ## State
 
-| Unit | State |
-| --- | --- |
-| Vault model | Verified against the live vault: 25/25 files assembled, 25/25 re-chunked to byte-identical chunk IDs |
-| Replicator | Pull-only, decoding at the `transform-pouch` boundary |
-| Note parsing | Frontmatter, tags, wikilinks, headings, Obsidian's own rules |
-| Index | SQLite FTS5: search, properties, tags, link graph |
-| Attachments | PDF text extraction, indexed and retrievable |
-| Handwriting | Transcriptions stored durably, indexed, survive an index rebuild |
-| Tools | Thirteen read tools, plus four write tools registered only when `READ_ONLY=false` |
-| Write executor | Built and tested: single-note writes, deletes, and the plan/commit protocol. The single-note half now has a tool surface |
-| Acceptance gate | Met. All three steps passed as of 28 July 2026 |
-| Transport | stdio and streamable HTTP, bearer token |
-| Deployment | Dockerfile and Compose for the Slugworx stack, not yet deployed |
-| OAuth 2.0 + PKCE | Not started, bearer token in the interim |
+| Unit             | State                                                                                                            |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Vault model      | Verified against the live vault: 25/25 files assembled, 25/25 re-chunked to byte-identical chunk IDs             |
+| Replicator       | Pull-only, decoding at the `transform-pouch` boundary                                                            |
+| Note parsing     | Frontmatter, tags, wikilinks, headings, Obsidian's own rules                                                     |
+| Index            | SQLite FTS5: search, properties, tags, link graph                                                                |
+| Attachments      | PDF text extraction, indexed and retrievable                                                                     |
+| Handwriting      | Transcriptions stored durably, indexed, survive an index rebuild                                                 |
+| Tools            | Thirteen read tools, plus eight write tools registered only when `READ_ONLY=false`                               |
+| Write executor   | Built and tested: single-note writes, deletes, and the plan/commit protocol. Both halves now have a tool surface |
+| Daily notes      | Path template inferred from the vault's own dated filenames, overridable, resolved in a configured time zone     |
+| Acceptance gate  | Met. All three steps passed as of 28 July 2026                                                                   |
+| Transport        | stdio and streamable HTTP, bearer token                                                                          |
+| Deployment       | Dockerfile and Compose for the Slugworx stack, not yet deployed                                                  |
+| OAuth 2.0 + PKCE | Not started, bearer token in the interim                                                                         |
 
 Thirteen read tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
 `property_inventory`, `find_by_property`, `tag_inventory`, `find_by_tag`,
 `note_links`, `vault_health`, `get_attachment`, `list_untranscribed`,
 `save_transcription`.
 
-Four write tools, registered only when `READ_ONLY=false`: `create_note`,
-`append_note`, `edit_note`, `set_properties`. Absent rather than disabled, so a
-read-only server does not advertise something it will refuse.
+Eight write tools, registered only when `READ_ONLY=false`. Five write a single
+note: `create_note`, `append_note`, `append_daily`, `edit_note`,
+`set_properties`. Three are the batch path: `plan_set_properties` writes
+nothing and returns a plan, `commit_plan` applies one by ID, `discard_plan`
+throws one away. Absent rather than disabled, so a read-only server does not
+advertise something it will refuse.
 
 Every one of them reads the note fresh from CouchDB and writes against the exact
 revision it read, in one observation. That is the whole reason
 `WriteRequest.expectedRev` is required: a tool that let the executor look the
 revision up would succeed every time and lose an edit occasionally.
+
+The batch path has the same requirement and it is easier to miss there.
+`plan_set_properties` reads each note to compose its new frontmatter, and
+planning then reads every target again to record the revision commit will check.
+Between those two reads is a window, and a plan that recorded the fresher
+revision would commit over a change it never saw. So a `PlanOperation` may carry
+its own `expectedRev`, and planning refuses outright if the vault has moved
+underneath it. Same discipline as the single-note path, on the path where nobody
+is watching the result.
+
+### Reviewing a plan
+
+`docs/design.md` called the rendering the real problem here, and it is: the plan
+protocol is only worth its cost if the review in the middle actually happens,
+and what defeats a review is not too little detail but too much. `renderPlan` in
+`src/write/render.ts` sorts by consequence rather than printing the changes. The
+totals come first, because most bad plans are visible from the totals alone. A
+change the composing tool marked `notable`, meaning it replaces or removes
+something that was there, is never truncated however long the plan gets.
+Everything else is sampled with an exact count of what was left out. No-ops are
+counted, not listed, so a plan that reports touching 400 notes when it will
+change three does not teach people that the numbers are noise.
+
+`notable` is set by the tool, not the plan machinery, because only the tool can
+know: overwriting a property that already had a different value and adding one
+that was absent produce identical plans otherwise, and only the first destroys
+something.
+
+### Daily notes
+
+Obsidian keeps the daily note folder and date format in `.obsidian/`, hidden
+files are not synced on this vault, and so the setting is not in CouchDB at all.
+`append_daily` infers the template from the dated filenames the vault already
+has, needs two of them before it will believe a pattern, and reports what it
+inferred on every call. `DAILY_NOTE_PATH` overrides it.
+
+`VAULT_TIMEZONE` is the other half and matters more in deployment than it looks.
+The container runs in UTC and Brisbane is ten hours ahead, so for ten hours of
+every day the container's date is yesterday's: every evening capture would be
+filed under the wrong day and nothing would report an error. It defaults to the
+host zone, which is right on a laptop, and `deploy/obsidian-mcp.env.example`
+sets it explicitly.
 
 ## The constraint that governs everything
 
@@ -101,16 +147,15 @@ revision back out of CouchDB after a transcription is saved.
 
 In rough order:
 
-1. **The rest of the write surface.** Four single-note tools exist. Still to
-   build: batch property setting across a query result, and append to today's
-   daily note. The batch one is plan-gated, so it needs tools that expose
-   `plan()` and `commit()` and a way to render a plan a person can review in a
-   chat window. That rendering is the actual design problem; the plumbing is
-   done.
-2. **OAuth 2.0 with PKCE**, which is what Claude's custom connector flow expects.
+1. **OAuth 2.0 with PKCE**, which is what Claude's custom connector flow expects.
    The bearer token works but is a shared secret.
-3. **Deploy.** `deploy/` is written and follows the homelab template, but the
+2. **Deploy.** `deploy/` is written and follows the homelab template, but the
    container has never been built on the server.
+
+3. **Re-run the gate.** The write path changed, so `npm run verify:write`
+   against `obsidian-writetest` is owed before anything points at `obsidiandb`.
+   It does not yet exercise the batch tools or `append_daily`; adding them to it
+   is part of this step rather than a separate one.
 
 Smaller things worth doing at some point:
 
@@ -123,7 +168,13 @@ Smaller things worth doing at some point:
 - E2EE is not enabled on the vault yet. The code handles it and the differential
   tests cover it, but no real encrypted vault has been read.
 - A `.gitattributes` (`* text=auto eol=crlf`) would stop the LF/CRLF warning on
-  every file touched from a Linux machine.
+  every file touched from a Linux machine. Worth doing: without it, a checkout
+  on Windows shows every tracked file as modified when the same working tree is
+  read from a Linux mount, which makes `git status` useless for seeing real
+  work.
+- The batch path only sets properties. Batch renaming, moving and retagging are
+  the obvious next selections, and all three need the same thing the property
+  one needed: a summary line a reviewer can read.
 
 ## Exercising the write tools by hand
 
@@ -211,16 +262,16 @@ To build one from scratch again:
    synced to: that is what a vault in real use looks like whatever it is called.
    Override with `--expect-devices N` only after looking at why.
 
-   This step is not optional, and the reason is not obvious. A database made by
-   replicating another one arrives with no milestone document, because that is a
-   `_local` document and `_local` documents do not replicate. Without it every
-   setting falls back to a default, and `customChunkSize` defaulting to 0 caps
-   `absoluteMaxPieceSize` at 100 KiB, below the 256 KiB unit the binary path
-   uses. Every attachment then gets sliced at exactly 100 KiB while text is
-   unaffected, because its own maximum is 1 KiB either way. The write succeeds,
-   reads back correctly, and is chunked unlike everything else in the vault.
-   `verify:write` refuses to run at all until a device has published settings;
-   this is why.
+    This step is not optional, and the reason is not obvious. A database made by
+    replicating another one arrives with no milestone document, because that is a
+    `_local` document and `_local` documents do not replicate. Without it every
+    setting falls back to a default, and `customChunkSize` defaulting to 0 caps
+    `absoluteMaxPieceSize` at 100 KiB, below the 256 KiB unit the binary path
+    uses. Every attachment then gets sliced at exactly 100 KiB while text is
+    unaffected, because its own maximum is 1 KiB either way. The write succeeds,
+    reads back correctly, and is chunked unlike everything else in the vault.
+    `verify:write` refuses to run at all until a device has published settings;
+    this is why.
 
 Then the machine half:
 

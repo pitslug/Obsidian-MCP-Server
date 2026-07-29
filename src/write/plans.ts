@@ -54,10 +54,48 @@ import {
 /** Fifteen minutes, per the design. */
 export const DEFAULT_PLAN_TTL_MS = 15 * 60 * 1000;
 
-export type PlanOperation =
-    { kind: "write"; path: string; content: FileContent } | { kind: "delete"; path: string; hard?: boolean };
+/**
+ * What a planned operation carries beyond the change itself.
+ *
+ * A plan is composed by a tool and read by a person, and those two want
+ * different vocabularies. The plan machinery knows about bytes and chunk
+ * counts, which is the right level for it and the wrong level for review:
+ * nobody sanity-checks a property change by looking at how the note's byte
+ * count moved. So the composing tool supplies the words.
+ *
+ * `notable` is the more important of the two. It marks a change as one that
+ * destroys something rather than adds something, and the renderer will never
+ * truncate a notable change out of the list however long that list gets. The
+ * tool is the only thing that can know which those are: overwriting a property
+ * that already had a different value is notable, adding one that was absent is
+ * not, and by the time a plan exists both look identical.
+ */
+export interface PlanAnnotation {
+    /** One line describing this change in the tool's own terms. */
+    summary?: string;
+    /** True when this change replaces or removes something that was there. */
+    notable?: boolean;
+    /**
+     * The revision the content was composed from.
+     *
+     * Supply it whenever the content was derived from the note's current text.
+     * Planning otherwise reads the revision itself, a moment after the tool
+     * read the text, and a note that changed in between would be recorded at a
+     * revision its planned content never saw. Commit would then accept the plan
+     * and overwrite the change, which is the exact failure the whole revision
+     * discipline exists to prevent, arriving through the one path where nobody
+     * is watching the result.
+     */
+    expectedRev?: string | null;
+}
 
-export interface PlannedChange {
+export type PlanOperation = PlanAnnotation &
+    (
+        | { kind: "write"; path: string; content: FileContent }
+        | { kind: "delete"; path: string; hard?: boolean }
+    );
+
+export interface PlannedChange extends PlanAnnotation {
     /** What the operation does to a path that may or may not already exist. */
     effect: "create" | "update" | "delete";
     path: string;
@@ -130,9 +168,12 @@ export class PlanCeilingError extends Error {
 }
 
 export class PlanStaleError extends Error {
-    constructor(readonly paths: string[]) {
+    constructor(
+        readonly paths: string[],
+        when: "made" | "being made" = "made"
+    ) {
         super(
-            `${paths.length} note(s) changed since this plan was made: ` +
+            `${paths.length} note(s) changed ${when === "made" ? "since this plan was made" : "while this plan was being made"}: ` +
                 `${paths.slice(0, 5).join(", ")}${paths.length > 5 ? ", ..." : ""}. ` +
                 `Nothing was written. Make a new plan against the current state.`
         );
@@ -232,6 +273,7 @@ export class PlanningWriteExecutor extends WriteExecutor {
 
         const now = this.now();
         const changes: PlannedChange[] = [];
+        const movedSinceComposed: string[] = [];
 
         for (const op of normalized) {
             const id = await this.idFor(op.path);
@@ -239,11 +281,27 @@ export class PlanningWriteExecutor extends WriteExecutor {
             const present = existing !== undefined && !isDeleted(existing);
             const before = present ? (existing as ChunkedEntry) : undefined;
 
+            // Where the caller composed content from a read of its own, the
+            // revision it read is the one this plan must record. Reading a
+            // fresher one here would paper over a change that landed in
+            // between, and the plan would commit happily over the top of it.
+            if (op.expectedRev !== undefined && (op.expectedRev ?? null) !== (existing?._rev ?? null)) {
+                movedSinceComposed.push(op.path);
+                continue;
+            }
+
+            const annotation: PlanAnnotation = {
+                summary: op.summary,
+                notable: op.notable,
+                expectedRev: op.expectedRev,
+            };
+
             if (op.kind === "delete") {
                 if (!present) {
                     // A delete of something absent is not an error worth
                     // failing the whole plan over, but it must be visible.
                     changes.push({
+                        ...annotation,
                         effect: "delete",
                         path: op.path,
                         id,
@@ -257,6 +315,10 @@ export class PlanningWriteExecutor extends WriteExecutor {
                     continue;
                 }
                 changes.push({
+                    ...annotation,
+                    // A delete always destroys something, whatever the tool
+                    // that composed it thought to say.
+                    notable: true,
                     effect: "delete",
                     path: op.path,
                     id,
@@ -282,6 +344,7 @@ export class PlanningWriteExecutor extends WriteExecutor {
             const sameContent = before !== undefined && sameChildren(before.children, composed.children);
 
             changes.push({
+                ...annotation,
                 effect: present ? "update" : "create",
                 path: op.path,
                 id,
@@ -293,6 +356,11 @@ export class PlanningWriteExecutor extends WriteExecutor {
                 unchanged: sameContent,
             });
         }
+
+        // Refused before the plan is stored, so there is no ID to commit and
+        // nothing to review. A plan is a promise about a state of the vault,
+        // and this one was already out of date before it was written down.
+        if (movedSinceComposed.length > 0) throw new PlanStaleError(movedSinceComposed, "being made");
 
         const plan: Plan = {
             id: randomUUID(),

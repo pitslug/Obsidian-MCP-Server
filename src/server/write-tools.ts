@@ -29,6 +29,9 @@ import type { FastMCP } from "fastmcp";
 import type { VaultReader } from "../vault/reader.js";
 import { NoteNotFoundError } from "../vault/reader.js";
 import { editFrontmatter, FrontmatterUnreadableError } from "../note/frontmatter.js";
+import { AmbiguousHeadingError, appendUnderHeading } from "../note/sections.js";
+import { civilDateIn, fillTemplate, inferDailyFormat, TimeZoneError } from "../note/daily.js";
+import type { VaultIndex } from "../index/index.js";
 import {
     RevisionConflictError,
     UnwritablePathError,
@@ -40,6 +43,14 @@ import { UnsyncablePathError } from "../vault-model/index.js";
 export interface WriteToolContext {
     reader: VaultReader;
     executor: WriteExecutor;
+    /** Used to work out where daily notes live. */
+    index: VaultIndex;
+    /** An explicit daily note template, when configured. */
+    dailyNotePath: string | undefined;
+    /** The zone whose civil date counts as today. */
+    timeZone: string;
+    /** Overridable for tests, which must not depend on the day they run. */
+    now?: () => number;
 }
 
 /** A note's current text and the revision it was read at, as one observation. */
@@ -96,6 +107,9 @@ async function reporting(work: () => Promise<string>): Promise<string> {
             error instanceof UnwritablePathError ||
             error instanceof UnsyncablePathError ||
             error instanceof FrontmatterUnreadableError ||
+            error instanceof AmbiguousHeadingError ||
+            error instanceof TimeZoneError ||
+            error instanceof DailyNoteUnknownError ||
             error instanceof BinaryTargetError
         ) {
             return error.message;
@@ -155,38 +169,97 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
     server.addTool({
         name: "append_note",
         description:
-            "Append text to the end of a note in the Obsidian vault, creating the note if it does " +
-            "not exist. Use this for capture: adding an entry to a daily note, a line to a running " +
-            "list, a thought to an inbox. Existing content is never modified.",
+            "Append text to a note in the Obsidian vault, creating the note if it does not exist. " +
+            "Use this for capture: adding an entry to a daily note, a line to a running list, a " +
+            "thought to an inbox. Existing content is never modified. Give a heading to append " +
+            "inside that section rather than at the end of the note, which is what you want on any " +
+            "note that has a structure.",
         parameters: z.object({
             path: z.string().describe("Vault-relative path including the .md extension."),
-            content: z.string().describe("Text to add at the end of the note."),
+            content: z.string().describe("Text to add."),
+            heading: z
+                .string()
+                .optional()
+                .describe(
+                    "Append at the end of this heading's section instead of the end of the note. " +
+                        "The heading is created at the end of the note if it does not exist."
+                ),
             separator: z
                 .string()
                 .optional()
                 .describe(
-                    "Placed between the existing content and the new text when the note already " +
-                        "has content. Defaults to a blank line."
+                    "Placed between the existing content and the new text when there is already " +
+                        "content to follow. Defaults to a blank line."
                 ),
         }),
-        execute: async ({ path, content, separator }) =>
+        execute: async ({ path, content, heading, separator }) =>
             reporting(async () => {
                 const current = await readForWrite(ctx, path);
-
-                // A note that does not end in a newline would otherwise have
-                // the appended text run onto its last line, which is almost
-                // never what someone appending a line meant.
-                const existing = current.text;
-                const joiner = existing.length === 0 ? "" : (separator ?? "\n\n");
-                const text =
-                    existing.length === 0 ? content : `${trimTrailingNewline(existing)}${joiner}${content}`;
+                const { text, where } = appended(current.text, content, heading, separator);
 
                 const receipt = await ctx.executor.write({
                     path,
                     content: { kind: "text", text },
                     expectedRev: current.rev,
                 });
-                return describe(receipt, current.existed ? "Appended to" : "Created");
+                return (
+                    describe(receipt, current.existed ? "Appended to" : "Created") +
+                    (where ? `\n${where}` : "")
+                );
+            }),
+    });
+
+    server.addTool({
+        name: "append_daily",
+        description:
+            "Append text to today's daily note in the Obsidian vault, creating the note if today " +
+            "does not have one yet. This is the capture tool: use it for a thought, a log entry, a " +
+            "task, anything that belongs to today rather than to a particular note. Works out " +
+            "where daily notes live from the vault itself, and says which path it used. Give a " +
+            "heading to file the text under a section of the note.",
+        parameters: z.object({
+            content: z.string().min(1).describe("Text to add to the daily note."),
+            heading: z
+                .string()
+                .optional()
+                .describe(
+                    "Append inside this section of the daily note, creating the heading if the " +
+                        "note does not have it yet. Use it to keep captures out of whatever " +
+                        "section happens to be last."
+                ),
+            date: z
+                .string()
+                .optional()
+                .describe(
+                    "A different day, as YYYY-MM-DD. Defaults to today in the vault's configured " +
+                        "time zone, which is not necessarily the server's."
+                ),
+            separator: z
+                .string()
+                .optional()
+                .describe(
+                    "Placed before the new text when there is already content. Defaults to a blank line."
+                ),
+        }),
+        execute: async ({ content, heading, date, separator }) =>
+            reporting(async () => {
+                const target = dailyTarget(ctx, date);
+                const current = await readForWrite(ctx, target.path);
+                const { text, where } = appended(current.text, content, heading, separator);
+
+                const receipt = await ctx.executor.write({
+                    path: target.path,
+                    content: { kind: "text", text },
+                    expectedRev: current.rev,
+                });
+
+                return [
+                    describe(receipt, current.existed ? "Appended to" : "Created"),
+                    where,
+                    target.provenance,
+                ]
+                    .filter(Boolean)
+                    .join("\n");
             }),
     });
 
@@ -289,6 +362,111 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
                 return `${describe(receipt, "Updated properties on")}\nProperties ${parts.join("; ")}.`;
             }),
     });
+}
+
+/**
+ * The note as it will be after appending, and a line saying where it went.
+ *
+ * The two appending tools share this rather than each having their own, because
+ * the difference between them is which note they choose and nothing else. Two
+ * implementations of "append" would drift, and the one that drifted would be
+ * the one appending to a daily note unattended.
+ */
+function appended(
+    existing: string,
+    content: string,
+    heading: string | undefined,
+    separator: string | undefined
+): { text: string; where: string } {
+    if (heading) {
+        const result = appendUnderHeading(existing, heading, content, { separator });
+        return {
+            text: result.text,
+            where: result.headingCreated
+                ? `There was no "${heading}" heading, so one was added at the end of the note.`
+                : `Added at the end of the "${heading}" section.`,
+        };
+    }
+
+    // A note that does not end in a newline would otherwise have the appended
+    // text run onto its last line, which is almost never what someone
+    // appending a line meant.
+    const joiner = existing.length === 0 ? "" : (separator ?? "\n\n");
+    const text = existing.length === 0 ? content : `${trimTrailingNewline(existing)}${joiner}${content}`;
+    return { text, where: "" };
+}
+
+export class DailyNoteUnknownError extends Error {
+    constructor(detail: string) {
+        super(
+            `Cannot work out where this vault's daily notes live. ${detail} ` +
+                `Obsidian keeps that setting in a hidden file this vault does not sync, so it is ` +
+                `inferred from the dated filenames already in the vault. Set DAILY_NOTE_PATH to a ` +
+                `template such as "daily/YYYY-MM-DD.md", or use append_note with an explicit path.`
+        );
+        this.name = "DailyNoteUnknownError";
+    }
+}
+
+interface DailyTarget {
+    path: string;
+    /** How the template was arrived at, for the tool to say out loud. */
+    provenance: string;
+}
+
+/**
+ * Where today's note is, and why this tool thinks so.
+ *
+ * The provenance is not decoration. An inferred path that is wrong creates a
+ * note in a folder nobody opens, which looks exactly like a note that was never
+ * created. Saying which template was used and where it came from is what makes
+ * that visible on the first append rather than the fiftieth.
+ */
+function dailyTarget(ctx: WriteToolContext, date: string | undefined): DailyTarget {
+    const civil = date ? parseIsoDate(date) : civilDateIn(ctx.timeZone, (ctx.now ?? Date.now)());
+
+    if (ctx.dailyNotePath) {
+        return {
+            path: fillTemplate(ctx.dailyNotePath, civil),
+            provenance: `DAILY_NOTE_PATH is set to "${ctx.dailyNotePath}".`,
+        };
+    }
+
+    const inferred = inferDailyFormat(ctx.index.allPaths());
+    if (!inferred) {
+        throw new DailyNoteUnknownError(
+            `No folder in the vault holds two or more notes with date-shaped filenames.`
+        );
+    }
+
+    const caveats = [
+        inferred.assumedDayFirst
+            ? `The filenames are day-month-year or month-day-year and none of them settles which, ` +
+              `so day-first was assumed.`
+            : "",
+        inferred.alternatives.length > 0
+            ? `Other folders also hold dated notes: ` +
+              `${inferred.alternatives.map((alt) => `${alt.folder || "the vault root"} (${alt.matches})`).join(", ")}.`
+            : "",
+    ].filter(Boolean);
+
+    return {
+        path: fillTemplate(inferred.template, civil),
+        provenance: [
+            `Inferred the template "${inferred.template}" from ${inferred.matches} existing note(s), ` +
+                `for example ${inferred.examples.slice(0, 2).join(" and ")}.`,
+            ...caveats,
+        ].join(" "),
+    };
+}
+
+function parseIsoDate(text: string): { year: number; month: number; day: number } {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text.trim());
+    if (!match) {
+        throw new DailyNoteUnknownError(`"${text}" is not a date. Give it as YYYY-MM-DD.`);
+    }
+    const [, year, month, day] = match.map(Number) as [number, number, number, number];
+    return { year, month, day };
 }
 
 /** Strip a single trailing newline, so appending does not accumulate blank lines. */

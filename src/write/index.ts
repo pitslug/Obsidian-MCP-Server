@@ -9,3 +9,4 @@
 export * from "./couch.js";
 export * from "./executor.js";
 export * from "./plans.js";
+export * from "./render.js";

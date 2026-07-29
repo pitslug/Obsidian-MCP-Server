@@ -25,6 +25,7 @@ import { VaultReader } from "../vault/reader.js";
 import { registerAttachmentTool, registerTools, registerTranscriptionTools } from "./tools.js";
 import { registerSearchTools } from "./search-tools.js";
 import { registerWriteTools } from "./write-tools.js";
+import { registerPlanTools } from "./plan-tools.js";
 import { CouchWriter, PlanningWriteExecutor } from "../write/index.js";
 import { VaultIndex } from "../index/index.js";
 import { IndexBuilder } from "../index/builder.js";
@@ -250,10 +251,23 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     });
 
     if (!config.readOnly) {
-        registerWriteTools(server, { reader, executor });
+        registerWriteTools(server, {
+            reader,
+            executor,
+            index,
+            dailyNotePath: config.dailyNotePath,
+            timeZone: config.timeZone,
+        });
+        registerPlanTools(server, { reader, index, executor });
         log.warn(
             `Writes are ENABLED against ${redactedUrl(config.couch)}. ` +
-                `Four tools can modify this vault: create_note, append_note, edit_note, set_properties.`
+                `Six tools can modify this vault directly: create_note, append_note, append_daily, ` +
+                `edit_note, set_properties and commit_plan. Batch property changes go through ` +
+                `plan_set_properties first and write nothing until a plan is committed.`
+        );
+        log.info(
+            `Today, for append_daily, is ${new Intl.DateTimeFormat("en-CA", { timeZone: config.timeZone }).format(new Date())} ` +
+                `in ${config.timeZone}.`
         );
     }
 

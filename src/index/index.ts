@@ -469,6 +469,32 @@ export class VaultIndex {
             .all(tag) as unknown as IndexedNote[];
     }
 
+    /**
+     * Every file under a folder, or the whole vault when no folder is given.
+     *
+     * The prefix carries its own separator, so asking for `daily` does not also
+     * return `daily-review/monday.md`. That folder would otherwise be included
+     * silently in a batch, and a batch is exactly where nobody is checking the
+     * membership of the list by eye.
+     */
+    notesUnder(folder?: string): IndexedNote[] {
+        const trimmed = folder?.replace(/^\/+|\/+$/g, "");
+        if (!trimmed) {
+            return this.db
+                .prepare(`SELECT path, kind, size, mtime FROM notes ORDER BY path`)
+                .all() as unknown as IndexedNote[];
+        }
+        return this.db
+            .prepare(
+                // A folder called `report_2026` holds an underscore, which LIKE
+                // reads as "any character". Escaped, or the batch quietly
+                // widens to `report-2026` as well.
+                `SELECT path, kind, size, mtime FROM notes
+                 WHERE path LIKE ? ESCAPE '\\' ORDER BY path`
+            )
+            .all(`${trimmed.replace(/[%_\\]/g, "\\$&")}/%`) as unknown as IndexedNote[];
+    }
+
     outgoingLinks(path: string): LinkRow[] {
         const rows = this.db
             .prepare(

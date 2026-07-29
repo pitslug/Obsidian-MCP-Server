@@ -123,7 +123,14 @@ beforeAll(async () => {
 
     for (const [path, text] of [
         ["daily/2026-07-28.md", "# Today\n\n- [ ] a task\n"],
+        // A second dated note, because one filename is not a convention and
+        // the daily note format is inferred from the vault rather than told.
+        ["daily/2026-07-27.md", "# Yesterday\n\n## Log\n\n- got up\n\n## Notes\n\nnothing.\n"],
+        ["notes/structured.md", "# Meeting\n\n## Actions\n\n- one\n\n## Attendees\n\n- Chris\n"],
         ["projects/house.md", "---\nstatus: active\npriority: 2\n---\n\nRefinancing the mortgage.\n"],
+        ["projects/shed.md", "---\nstatus: active\n---\n\nThe shed.\n"],
+        ["projects/fence.md", "---\ntags: [project]\n---\n\nThe fence.\n"],
+        ["projects/broken.md", "---\nstatus: [unclosed\n---\n\nBad YAML on purpose.\n"],
         ["notes/repeated.md", "alpha\nbeta\nalpha\n"],
     ]) {
         const composed = await composeWrite(
@@ -165,18 +172,22 @@ afterAll(async () => {
 });
 
 describe("the write surface", () => {
-    it("registers exactly the four single-note tools when writes are enabled", async () => {
+    it("registers the write tools when writes are enabled", async () => {
         const { tools } = await client.listTools();
         const names = tools.map((t) => t.name);
 
-        expect(names).toContain("create_note");
-        expect(names).toContain("append_note");
-        expect(names).toContain("edit_note");
-        expect(names).toContain("set_properties");
-        // The batch and plan-gated tools are not built yet, and must not be
-        // advertised before they are.
-        expect(names).not.toContain("plan_changes");
-        expect(names).not.toContain("commit_plan");
+        for (const name of [
+            "create_note",
+            "append_note",
+            "append_daily",
+            "edit_note",
+            "set_properties",
+            "plan_set_properties",
+            "commit_plan",
+            "discard_plan",
+        ]) {
+            expect(names).toContain(name);
+        }
     });
 
     it("says so in vault_status", async () => {
@@ -344,5 +355,171 @@ describe("set_properties", () => {
     it("asks for something to do when given neither set nor remove", async () => {
         const out = await call("set_properties", { path: "projects/house.md" });
         expect(out).toContain("Nothing to do");
+    });
+});
+
+describe("appending under a heading", () => {
+    it("puts the text at the end of the named section", async () => {
+        await call("append_note", {
+            path: "notes/structured.md",
+            heading: "Actions",
+            content: "- two",
+        });
+
+        expect(await inVault("notes/structured.md")).toBe(
+            "# Meeting\n\n## Actions\n\n- one\n\n- two\n\n## Attendees\n\n- Chris\n"
+        );
+    });
+
+    it("creates the heading when the note does not have it, and says so", async () => {
+        const out = await call("append_note", {
+            path: "notes/structured.md",
+            heading: "Decisions",
+            content: "- ship it",
+        });
+
+        expect(out).toContain('There was no "Decisions" heading');
+        expect(await inVault("notes/structured.md")).toContain("## Decisions\n\n- ship it\n");
+    });
+
+    it("refuses an ambiguous heading rather than picking a section", async () => {
+        await writeBehindItsBack("notes/twice.md", "## Log\n\na\n\n## Log\n\nb\n");
+        const out = await call("append_note", { path: "notes/twice.md", heading: "Log", content: "c" });
+
+        expect(out).toContain("appears 2 times");
+        expect(await inVault("notes/twice.md")).toBe("## Log\n\na\n\n## Log\n\nb\n");
+    });
+});
+
+describe("append_daily", () => {
+    it("works out where daily notes live and says how", async () => {
+        const out = await call("append_daily", { content: "- a thought", date: "2026-07-27" });
+
+        expect(out).toContain('Inferred the template "daily/YYYY-MM-DD.md"');
+        expect(out).toContain('"daily/2026-07-27.md"');
+        expect(await inVault("daily/2026-07-27.md")).toContain("nothing.\n\n- a thought");
+    });
+
+    it("files the text under a heading when given one", async () => {
+        await call("append_daily", { content: "- got dressed", date: "2026-07-27", heading: "Log" });
+
+        const text = await inVault("daily/2026-07-27.md");
+        expect(text).toContain("- got up\n\n- got dressed\n\n## Notes");
+    });
+
+    it("creates the day's note when there is not one yet", async () => {
+        const out = await call("append_daily", { content: "First thing.", date: "2026-06-01" });
+
+        expect(out).toContain("Created");
+        expect(await inVault("daily/2026-06-01.md")).toBe("First thing.");
+    });
+
+    it("defaults to today in the vault's time zone", async () => {
+        const today = new Intl.DateTimeFormat("en-CA", {
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        }).format(new Date());
+
+        const out = await call("append_daily", { content: "today's capture" });
+
+        expect(out).toContain(`daily/${today}.md`);
+    });
+
+    it("refuses a date that is not a date", async () => {
+        const out = await call("append_daily", { content: "x", date: "yesterday" });
+        expect(out).toContain("is not a date");
+    });
+});
+
+describe("plan_set_properties", () => {
+    it("refuses a selection that would mean the whole vault", async () => {
+        const out = await call("plan_set_properties", { set: { reviewed: true } });
+        expect(out).toContain("No selection was given");
+    });
+
+    it("plans without writing, and names the notes it would change", async () => {
+        const before = await inVault("projects/shed.md");
+        const out = await call("plan_set_properties", {
+            property_key: "status",
+            property_value: "active",
+            set: { reviewed: "2026-07-28" },
+        });
+
+        expect(out).toContain("Selection: notes where status =");
+        expect(out).toContain("projects/shed.md: adds reviewed = 2026-07-28");
+        expect(out).toContain("Nothing has been written.");
+        expect(await inVault("projects/shed.md")).toBe(before);
+    });
+
+    it("separates overwrites from additions, and excludes what it cannot parse", async () => {
+        const out = await call("plan_set_properties", {
+            folder: "projects",
+            set: { status: "archived" },
+        });
+
+        expect(out).toContain("Replaces or removes existing content");
+        expect(out).toContain("projects/shed.md: overwrites status (to archived)");
+        expect(out).toContain("projects/fence.md: adds status = archived");
+        expect(out).toContain("Excluded (1):");
+        expect(out).toContain("projects/broken.md");
+    });
+
+    it("does not cross a folder boundary that merely shares a prefix", async () => {
+        const out = await call("plan_set_properties", { folder: "project", set: { x: 1 } });
+        expect(out).toContain("No notes are under");
+    });
+
+    it("intersects selectors rather than combining them", async () => {
+        const out = await call("plan_set_properties", {
+            folder: "projects",
+            property_key: "tags",
+            set: { reviewed: true },
+        });
+
+        expect(out).toContain("projects/fence.md");
+        expect(out).not.toContain("projects/shed.md");
+    });
+
+    it("commits a plan, and refuses to commit it twice", async () => {
+        const planned = await call("plan_set_properties", {
+            property_key: "tags",
+            property_value: "project",
+            set: { reviewed: "yes" },
+        });
+        const planId = /Plan ([0-9a-f-]{36})/.exec(planned)?.[1];
+        expect(planId).toBeDefined();
+
+        const committed = await call("commit_plan", { plan_id: planId as string });
+        expect(committed).toContain("1 note(s) written");
+        expect(await inVault("projects/fence.md")).toContain("reviewed: yes");
+
+        const again = await call("commit_plan", { plan_id: planId as string });
+        expect(again).toContain("already been committed");
+    });
+
+    it("refuses in full when a note moved after the plan was made", async () => {
+        const planned = await call("plan_set_properties", {
+            folder: "projects",
+            property_key: "status",
+            set: { phase: "planning" },
+        });
+        const planId = /Plan ([0-9a-f-]{36})/.exec(planned)?.[1] as string;
+
+        await writeBehindItsBack("projects/shed.md", "---\nstatus: active\n---\n\nChanged elsewhere.\n");
+
+        const out = await call("commit_plan", { plan_id: planId });
+        expect(out).toContain("Nothing was written");
+        expect(await inVault("projects/shed.md")).toContain("Changed elsewhere.");
+        expect(await inVault("projects/shed.md")).not.toContain("phase");
+    });
+
+    it("discards a plan on request", async () => {
+        const planned = await call("plan_set_properties", {
+            property_key: "status",
+            set: { discarded: true },
+        });
+        const planId = /Plan ([0-9a-f-]{36})/.exec(planned)?.[1] as string;
+
+        expect(await call("discard_plan", { plan_id: planId })).toContain("discarded");
+        expect(await call("commit_plan", { plan_id: planId })).toContain("No plan with ID");
     });
 });
