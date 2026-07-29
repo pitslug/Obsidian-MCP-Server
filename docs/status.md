@@ -1,8 +1,16 @@
 # Where this is up to
 
 Written 28 July 2026, and updated as each piece landed: the write executor, the
-single-note tools, then the batch and daily ones. `docs/design.md` is the plan; this is the
-progress against it and the things you would otherwise have to rediscover.
+single-note tools, then the batch and daily ones, then the deployment.
+`docs/design.md` is the plan; this is the progress against it and the things you
+would otherwise have to rediscover.
+
+**Why this exists.** The notes are being migrated out of OneNote, and the
+OneNote MCP server already does this job there. So the question this project has
+to answer is not "does it work" but "can it do what OneNote does". That is why
+the vault is nearly empty: no content moves across until the tooling is proven,
+and the parity gaps are listed under "What to do next" alongside the deployment
+work.
 
 ## Getting a machine ready
 
@@ -10,7 +18,7 @@ progress against it and the things you would otherwise have to rediscover.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 585 tests, ~70s
+npm test          # 592 tests, ~85s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -35,8 +43,9 @@ environment, or from Docker secrets in deployment. This repo is public.
 | Daily notes      | Path template inferred from the vault's own dated filenames, overridable, resolved in a configured time zone     |
 | Acceptance gate  | Met. Step three re-run end to end against `obsidian-writetest` on 29 July 2026, and confirmed in Obsidian         |
 | Transport        | stdio and streamable HTTP                                                                                        |
-| Deployment       | Dockerfile, Compose, and an image CI publishes to GHCR. Never yet run on the server                              |
-| OAuth 2.1        | Resource server against Pocket-ID: audience-bound tokens, scopes at the tool boundary. Not yet exercised live    |
+| Vault contents   | 12 text notes, 15 attachments. Deliberately nearly empty until the OneNote migration starts                      |
+| Deployment       | Live on the Slugworx stack since 29 July 2026, pinned to `:0.1`, `READ_ONLY=true`                                 |
+| OAuth 2.1        | Exercised live: Claude connects through Pocket-ID holding `vault:read`, and the audience check was confirmed     |
 
 Thirteen read tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
 `property_inventory`, `find_by_property`, `tag_inventory`, `find_by_tag`,
@@ -114,9 +123,9 @@ suite rather than quietly ending the property.
 
 Three things stand between that one file and the vault. `READ_ONLY` defaults to
 true and is checked before a request is built, not after a response comes back,
-so a read-only deployment cannot reach CouchDB with a PUT at all. The four write tools are
-registered only when writes are enabled, so a read-only server has no path from
-a client to the executor at all. And `COUCHDB_DATABASE` still points wherever it is configured to point:
+so a read-only deployment cannot reach CouchDB with a PUT at all. The eight
+write tools are registered only when writes are enabled, so a read-only server
+has no path from a client to the executor at all. And `COUCHDB_DATABASE` still points wherever it is configured to point:
 nothing in the code prefers the real vault.
 
 The order to relax these in is the order they are listed. Build the tools
@@ -151,46 +160,80 @@ revision back out of CouchDB after a transcription is saved.
 
 ## What to do next
 
-In rough order:
+A checklist rather than prose, because it is now being worked across two
+machines. Rough priority order within each group.
 
-1. **Deploy.** `deploy/README.md` is the runbook and it is current: the
-   Pocket-ID prerequisites, the exact env values, the curl checks that catch a
-   broken handshake, and a four-step order for turning writes on. The image is
-   built by CI rather than on the server, so the first deploy is a pull. It has
-   still never been run there.
+### Parity with OneNote, which is what decides the migration
 
-    Two things to do once, in that order: make the GHCR package public (it
-    starts private even for a public repository, and a private one fails the
-    first pull with a 401 that reads like a missing image), and tag `v0.1.0` so
-    the compose file can pin `:0.1` instead of tracking `:edge`.
+- [ ] **A delete tool.** `PlanningWriteExecutor.remove` already does this, is
+      tested, soft-deletes by default and takes an opt-in `hard` flag, and the
+      gate exercises delete then write-over-the-tombstone. No MCP tool exposes
+      it, so a note created by mistake cannot be removed through the server.
+      OneNote has `delete_page`. Thin work: a tool definition, the `vault:write`
+      scope check, and tests. Do this before any content moves across.
+- [ ] **Decide what a move or rename means here, then build it.** OneNote has
+      `move_page` and `copy_page`; nothing here can relocate a note, and
+      reorganising as you go is most of what migrating is. The design question
+      first: a rename has to rewrite every `[[wikilink]]` pointing at the old
+      path, which Obsidian does silently in the app, and a move made through
+      this server without that rewrite breaks links quietly. `vault_health`
+      already finds broken links, so the detection half exists. Batch rename and
+      move are also the obvious next plan/commit selections.
+- [ ] **Decide whether OneNote ink or its transcription is the source of truth.**
+      OneNote treats handwriting as first class (`get_page_ink`,
+      `render_page_ink`). Here a handwritten page arrives as an image or PDF
+      attachment and the equivalent is `list_untranscribed` plus
+      `save_transcription`. Better for search, but it is transcription rather
+      than ink, and the transcriptions are the only data in this system that
+      nothing can recompute.
+- [ ] Run the same task through both servers side by side once, rather than
+      comparing tool lists. The gaps above came from the registered tool names.
 
-2. **Re-run the gate.** The write path changed, so `npm run verify:write`
-   against `obsidian-writetest` is owed before anything points at `obsidiandb`.
-   It now covers the whole surface: insertion under a heading, property setting
-   across several notes, a plan composed from a stale read, and two captures
-   into a fresh daily note. It also prints the rendered plan and what daily note
-   template it would infer, both of which are there to be looked at rather than
-   asserted.
+### Finishing the deployment
 
-Smaller things worth doing at some point:
+- [ ] **Tag `v0.1.1`.** `v0.1.0` sits at `e7bd3b0`, so the runbook fix and the
+      roots fix are not in the running image. The compose file pins `:0.1` and
+      that tag moves, so a tag plus `docker compose pull obsidian-mcp` is the
+      whole job. No compose edit.
+- [ ] Homepage entry.
+- [ ] Uptime Kuma monitor against `http://obsidian-mcp:8080/health` on
+      `docker_net`. Not `/mcp`, which correctly answers 401 and would read as
+      permanently down.
+- [ ] Commit `compose/obsidian-mcp.yml` to the `SlugworxServer` repo, no secrets
+      in the diff.
 
-- `get_attachment` refuses an attachment over `ATTACHMENT_SIZE_CAP` but will
-  still serve a stored transcription for it. Untested; add one.
-- The executor refuses to soft-delete a pre-chunking (`type: "notes"`) note on an
-  encrypted vault, because the tombstone would carry the note's plaintext. If the
-  vault turns out to hold such notes, the fix is to rewrite them through the
-  chunked path rather than to relax the refusal.
-- E2EE is not enabled on the vault yet. The code handles it and the differential
-  tests cover it, but no real encrypted vault has been read.
-- The `authenticate` hook must never throw anything but a `Response`. Anything
-  else is caught by the transport, which substitutes a challenge of its own
-  invention: different error code, different metadata URL, and the exception
-  text as the description. This happened once, from a header builder that
-  refused to quote a string containing a quote. `test/integration/oauth.spec.ts`
-  asserts the exact challenge for that reason.
-- The batch path only sets properties. Batch renaming, moving and retagging are
-  the obvious next selections, and all three need the same thing the property
-  one needed: a summary line a reviewer can read.
+### Turning writes on, one switch at a time
+
+Four switches stand between the container and the vault, and `deploy/README.md`
+has the detail. Switch one is done and is meant to be lived with.
+
+- [x] `READ_ONLY=true`, client granted only `vault:read`.
+- [ ] `READ_ONLY=false`, client still only `vault:read`. Every write tool should
+      appear and refuse by name. **The only step that tests a control rather
+      than exercising a path that was already open.** Costs one reconnect.
+- [ ] Grant `vault:write` in Pocket-ID, with `COUCHDB_DATABASE` pointed at
+      `obsidian-writetest`.
+- [ ] Point `COUCHDB_DATABASE` at `obsidiandb`.
+
+### Smaller things, whenever
+
+- [ ] `get_attachment` refuses an attachment over `ATTACHMENT_SIZE_CAP` but will
+      still serve a stored transcription for it. Untested; add one.
+- [ ] E2EE is not enabled on the vault. The code handles it and the differential
+      tests cover it, but no real encrypted vault has been read.
+- [ ] Rotate the CouchDB `obsidian` password. It was passed on a command line
+      and pasted into a chat on 29 July 2026.
+- [ ] The executor refuses to soft-delete a pre-chunking (`type: "notes"`) note
+      on an encrypted vault, because the tombstone would carry the note's
+      plaintext. If the vault turns out to hold such notes, the fix is to rewrite
+      them through the chunked path rather than to relax the refusal.
+- [ ] The `authenticate` hook must never throw anything but a `Response`.
+      Anything else is caught by the transport, which substitutes a challenge of
+      its own invention: different error code, different metadata URL, and the
+      exception text as the description. This happened once, from a header
+      builder that refused to quote a string containing a quote.
+      `test/integration/oauth.spec.ts` asserts the exact challenge for that
+      reason.
 
 ## Authentication
 
