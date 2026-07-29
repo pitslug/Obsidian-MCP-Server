@@ -70,12 +70,25 @@ Nothing here holds an OAuth credential.
     compose file: this service holds transcriptions nothing can recompute, and
     the stack pins stateful services for exactly that reason.
 
-2. Create the secret:
+2. Create the data directory and the secret:
 
     ```bash
+    mkdir -p $DATADIR/obsidian-mcp
+    chown -R $PUID:$PGID $DATADIR/obsidian-mcp
+
     printf '%s' 'the-couchdb-password' > $SECRETSDIR/obsidian_mcp_couchdb_password
     chmod 600 $SECRETSDIR/obsidian_mcp_couchdb_password
     ```
+
+    The `mkdir` and `chown` are not optional, and this service is the unusual
+    one on the stack in needing them. It runs as `user: "$PUID:$PGID"` because
+    the image has no PUID entrypoint of its own, so unlike a linuxserver.io
+    container it cannot correct the ownership after the fact. Left to create the
+    directory itself, Docker makes it `root`, the LevelDB replica fails to open,
+    and the failure lands inside a promise rather than at startup: the container
+    reports healthy-ish, logs "Replicating. Waiting for the first pass to
+    complete", and then simply waits. An empty `$DATADIR/obsidian-mcp` is the
+    tell.
 
     `printf` rather than `echo`, so no trailing newline lands in the password.
     (The server strips one anyway, but the habit is worth keeping for secrets

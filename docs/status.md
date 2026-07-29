@@ -381,6 +381,14 @@ server with `READ_ONLY=false`.
   without one the working tree was CRLF against an LF index, `git status`
   reported every tracked file as modified, and the four that really were modified
   were invisible in the noise.
+- **A container that cannot write its data directory waits rather than fails.**
+  First deploy, 29 July 2026: `$DATADIR/obsidian-mcp` did not exist, so Docker
+  created it as `root`, and this container runs as `$PUID:$PGID` because the
+  image has no PUID entrypoint to correct that itself. Opening the LevelDB
+  replica failed inside a promise, so there was no startup error and no log line,
+  just "Waiting for the first pass to complete" forever. The empty data directory
+  is the diagnostic. `deploy/README.md` step two now creates and chowns it before
+  anything starts.
 
 ## Re-running the gate
 
