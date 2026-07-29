@@ -133,23 +133,159 @@ export interface Config {
      */
     timeZone: string;
 
+    /**
+     * How the HTTP transport decides who is calling.
+     *
+     * A union rather than a bag of optional fields, because the three modes
+     * need disjoint settings and "OAuth issuer set but shared token also set"
+     * is not a state worth being able to represent. Ignored entirely on stdio,
+     * where the transport itself is the boundary.
+     */
+    auth: AuthConfig;
+
     transport: {
         kind: "stdio" | "http";
         host: string;
         port: number;
-        /**
-         * Required bearer token for the HTTP transport.
-         *
-         * The design calls for OAuth 2.0 with PKCE, which is what Claude's
-         * custom connector flow expects; this is the interim while that is
-         * unbuilt. A shared token is weaker than OAuth but far better than an
-         * open endpoint, and it means the service is not relying solely on
-         * whatever sits in front of it.
-         */
-        bearerToken: string | undefined;
     };
 
     logLevel: "debug" | "info" | "warn" | "error";
+}
+
+/**
+ * How callers authenticate over HTTP.
+ *
+ * `oauth` is what Claude's custom connector flow expects and the only mode that
+ * can tell one caller from another. `bearer` is a shared secret: it keeps the
+ * endpoint from being open, and that is the whole of what it does. `none` exists
+ * for a server reachable only from a place that has already decided who may
+ * talk to it, and has to be asked for by name.
+ */
+export type AuthConfig =
+    | { mode: "none" }
+    | { mode: "bearer"; token: string }
+    | {
+          mode: "oauth";
+          /** The authorization server's issuer identifier. */
+          issuer: string;
+          /**
+           * This server's canonical URI, and the audience a token must name.
+           *
+           * The single most important value in this file. It is what the client
+           * sends as the RFC 8707 `resource` parameter, what the authorization
+           * server stamps into the token, and what this server checks. All
+           * three have to agree exactly, so it is configured rather than
+           * derived: guessing it from a request's Host header would let
+           * whoever controls that header choose the audience being checked.
+           */
+          resource: string;
+          /** Where the signing keys are, when the issuer publishes no discovery document. */
+          jwksUri: string | undefined;
+      };
+
+/**
+ * Read the auth mode, and refuse a half-configured one.
+ *
+ * Every failure here is at startup with a message naming the variable, because
+ * the alternative is a server that starts, looks healthy, and is either open to
+ * the world or unable to authenticate anyone.
+ */
+function authConfig(transportKind: "stdio" | "http"): AuthConfig {
+    const declared = env("AUTH_MODE");
+    const issuer = env("OAUTH_ISSUER");
+    const token = env("MCP_BEARER_TOKEN");
+
+    // Inferred only when unambiguous. An operator who set both an issuer and a
+    // token has two things in mind and should say which one wins.
+    const mode = declared ?? (issuer ? "oauth" : token ? "bearer" : undefined);
+
+    if (declared === undefined && issuer && token) {
+        throw new ConfigError(
+            `Both OAUTH_ISSUER and MCP_BEARER_TOKEN are set, so it is not clear which should apply. ` +
+                `Set AUTH_MODE to "oauth" or "bearer".`
+        );
+    }
+
+    if (transportKind === "stdio") return { mode: "none" };
+
+    switch (mode) {
+        case "none":
+            return { mode: "none" };
+
+        case "bearer":
+            if (!token) {
+                throw new ConfigError(
+                    `AUTH_MODE is "bearer" but MCP_BEARER_TOKEN is not set. Set it, or ` +
+                        `MCP_BEARER_TOKEN_FILE naming a file to read it from.`
+                );
+            }
+            return { mode: "bearer", token };
+
+        case "oauth": {
+            if (!issuer) {
+                throw new ConfigError(
+                    `AUTH_MODE is "oauth" but OAUTH_ISSUER is not set. It is the authorization ` +
+                        `server's issuer identifier, for example https://auth.example.com.`
+                );
+            }
+            const resource = env("MCP_PUBLIC_URL");
+            if (!resource) {
+                throw new ConfigError(
+                    `AUTH_MODE is "oauth" but MCP_PUBLIC_URL is not set. It must be this server's ` +
+                        `public URL exactly as a client will address it, including the path, for ` +
+                        `example https://obsidian-mcp.example.com/mcp. Tokens are accepted only ` +
+                        `when they name it as their audience, so a wrong value rejects everything.`
+                );
+            }
+            return {
+                mode: "oauth",
+                issuer: absoluteUrl("OAUTH_ISSUER", issuer).replace(/\/+$/, ""),
+                resource: absoluteUrl("MCP_PUBLIC_URL", resource).replace(/\/+$/, ""),
+                jwksUri: env("OAUTH_JWKS_URI"),
+            };
+        }
+
+        case undefined:
+            throw new ConfigError(
+                `MCP_TRANSPORT is http but nothing says how callers should authenticate. Set ` +
+                    `OAUTH_ISSUER for OAuth, or MCP_BEARER_TOKEN for a shared token. Refusing to ` +
+                    `expose the vault over HTTP with no authentication of its own; if that is ` +
+                    `genuinely what you want, say so with AUTH_MODE=none.`
+            );
+
+        default:
+            throw new ConfigError(`AUTH_MODE must be "oauth", "bearer" or "none", not "${mode}".`);
+    }
+}
+
+/**
+ * A URL that is absolute, https, and carries no fragment or query.
+ *
+ * Checked because these values are compared as strings against what an
+ * authorization server puts in a token. A value that merely looks like a URL
+ * fails that comparison every time, and the failure appears as "every token is
+ * rejected" rather than as anything pointing at this setting.
+ */
+function absoluteUrl(name: string, value: string): string {
+    let parsed: URL;
+    try {
+        parsed = new URL(value);
+    } catch {
+        throw new ConfigError(`${name} is "${value}", which is not an absolute URL.`);
+    }
+    if (parsed.protocol !== "https:" && parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1") {
+        throw new ConfigError(
+            `${name} is "${value}". It must use https, since a bearer token sent over http is ` +
+                `readable by anything on the path.`
+        );
+    }
+    if (parsed.hash || parsed.search) {
+        throw new ConfigError(
+            `${name} is "${value}". A resource identifier carries no query string or fragment; ` +
+                `RFC 8707 requires the bare URL.`
+        );
+    }
+    return value;
 }
 
 /**
@@ -187,15 +323,7 @@ export function loadConfig(): Config {
         throw new ConfigError(`MCP_TRANSPORT must be "stdio" or "http", not "${kind}".`);
     }
 
-    const bearerToken = env("MCP_BEARER_TOKEN");
-    if (kind === "http" && !bearerToken) {
-        throw new ConfigError(
-            "MCP_TRANSPORT is http but MCP_BEARER_TOKEN is not set. Refusing to expose the vault " +
-                "over HTTP with no authentication of its own. Set MCP_BEARER_TOKEN (or " +
-                "MCP_BEARER_TOKEN_FILE for a Docker secret)."
-        );
-    }
-
+    const auth = authConfig(kind);
     const readOnly = bool("READ_ONLY", true);
 
     return {
@@ -221,11 +349,11 @@ export function loadConfig(): Config {
         planCeiling: integer("PLAN_CEILING", 500),
         dailyNotePath: dailyNotePath(),
         timeZone: env("VAULT_TIMEZONE") ?? hostTimeZone(),
+        auth,
         transport: {
             kind,
             host: env("MCP_HOST", "0.0.0.0") as string,
             port: integer("MCP_PORT", 8080),
-            bearerToken,
         },
         logLevel: (env("LOG_LEVEL", "info") as Config["logLevel"]) ?? "info",
     };

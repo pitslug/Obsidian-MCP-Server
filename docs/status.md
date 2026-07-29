@@ -10,7 +10,7 @@ progress against it and the things you would otherwise have to rediscover.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 520 tests, ~70s
+npm test          # 579 tests, ~80s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -147,12 +147,10 @@ revision back out of CouchDB after a transcription is saved.
 
 In rough order:
 
-1. **OAuth 2.0 with PKCE**, which is what Claude's custom connector flow expects.
-   The bearer token works but is a shared secret.
-2. **Deploy.** `deploy/` is written and follows the homelab template, but the
+1. **Deploy.** `deploy/` is written and follows the homelab template, but the
    container has never been built on the server.
 
-3. **Re-run the gate.** The write path changed, so `npm run verify:write`
+2. **Re-run the gate.** The write path changed, so `npm run verify:write`
    against `obsidian-writetest` is owed before anything points at `obsidiandb`.
    It does not yet exercise the batch tools or `append_daily`; adding them to it
    is part of this step rather than a separate one.
@@ -167,6 +165,12 @@ Smaller things worth doing at some point:
   chunked path rather than to relax the refusal.
 - E2EE is not enabled on the vault yet. The code handles it and the differential
   tests cover it, but no real encrypted vault has been read.
+- The `authenticate` hook must never throw anything but a `Response`. Anything
+  else is caught by the transport, which substitutes a challenge of its own
+  invention: different error code, different metadata URL, and the exception
+  text as the description. This happened once, from a header builder that
+  refused to quote a string containing a quote. `test/integration/oauth.spec.ts`
+  asserts the exact challenge for that reason.
 - A `.gitattributes` (`* text=auto eol=crlf`) would stop the LF/CRLF warning on
   every file touched from a Linux machine. Worth doing: without it, a checkout
   on Windows shows every tracked file as modified when the same working tree is
@@ -175,6 +179,108 @@ Smaller things worth doing at some point:
 - The batch path only sets properties. Batch renaming, moving and retagging are
   the obvious next selections, and all three need the same thing the property
   one needed: a summary line a reviewer can read.
+
+## Authentication
+
+`AUTH_MODE` picks one of three. `oauth` is the real one and what Claude's custom
+connector flow expects. `bearer` is the shared token this had before, kept
+because it is useful for driving the server by hand. `none` has to be asked for
+by name: a server that quietly served the vault to anyone is not a failure mode
+worth leaving reachable by omission.
+
+This server is a **resource server** and nothing else. It does not log anyone in
+and it issues no tokens. Pocket-ID does both, which is also what puts the vault
+behind the same passkey as everything else on the network.
+
+### The audience check is the whole thing
+
+Everything else in `src/auth/tokens.ts` is table stakes. The audience check is
+the control that matters and the one easiest to leave out, because everything
+works without it.
+
+Pocket-ID signs tokens for every service on the network with the same key and
+the same issuer. A server checking only the signature and the issuer would
+accept the token Immich holds, or Mealie, or Papra. One leaked token from the
+least careful service on the network would be a key to the most sensitive thing
+on it. So a token is accepted only when its `aud` names
+`https://obsidian-mcp.slugworx.net/mcp` exactly, and `test/auth/tokens.spec.ts`
+has a test for precisely that case: right key, right issuer, right person, wrong
+service, refused.
+
+Pocket-ID fills `aud` from the RFC 8707 `resource` parameter, which the MCP
+specification requires clients to send and Claude always sends. That is what
+makes the check possible at all, and it is why the setup below is not optional.
+
+### Setting it up in Pocket-ID
+
+**Pocket-ID v2.10.0 or later.** That release added OAuth APIs with scoped
+permissions, which is the feature all of this rests on. Check the running
+version before anything else; Pocket-ID is one of the pinned images.
+
+1. **Register the API.** In Pocket-ID, add an API whose identifier is
+   `https://obsidian-mcp.slugworx.net/mcp`, exactly matching `MCP_PUBLIC_URL`
+   and the URL typed into Claude. Give it two permissions: `vault:read` and
+   `vault:write`.
+
+    Not optional, and the failure if it is skipped is not obvious. Claude always
+    sends `resource`, and Pocket-ID answers a `resource` naming an API it does
+    not know with `invalid_target`, which fails the authorization request before
+    any token exists. The symptom is a connector that will not connect, with
+    nothing wrong at this end.
+
+2. **Register the client.** An OIDC client called something like `Claude`, with
+   both callback URLs, since Claude uses either host:
+
+       https://claude.ai/api/mcp/auth_callback
+       https://claude.com/api/mcp/auth_callback
+
+    PKCE on. Confidential, so it has a secret. Grant it `vault:read` on the API
+    above, and `vault:write` only when writes are meant to be on.
+
+3. **Add the connector in Claude.** A custom connector pointed at
+   `https://obsidian-mcp.slugworx.net/mcp`, with the client ID and secret from
+   step 2 pasted in. Pocket-ID does not support dynamic client registration and
+   does not publish a Client ID Metadata Document, so a pre-registered client is
+   the path, and it is the better one here anyway: one stable client rather than
+   a new registration per connection.
+
+### Rolling it out
+
+The scope and the read-only switch are different controls and worth moving
+separately. Grant `vault:read` only, with `READ_ONLY=true`, and live with it.
+Then `READ_ONLY=false` while the token still carries only `vault:read`, which
+proves the scope gate rather than assuming it: every write tool should refuse.
+Then grant `vault:write`.
+
+### Things that will bite
+
+- **Anthropic reaches both hosts, from `160.79.104.0/21`.** Discovery requests
+  go to `auth.slugworx.net` from the same range as the MCP requests. A rule that
+  lets one through and not the other fails in a way that looks like the MCP
+  server being unreachable.
+- **The router stays on `chain-no-auth@file`.** The service authenticates its
+  own callers now, properly. Putting traefik-forward-auth in front would break
+  it: an MCP client cannot complete an interactive browser login for a
+  forward-auth cookie.
+- **Claude waits 10 seconds** for discovery and token endpoints, and 30 for
+  refresh. Well within what Pocket-ID does, but worth knowing when the flow
+  fails intermittently.
+- **`MCP_PUBLIC_URL` has to be exact.** Trailing slash, missing `/mcp`, http
+  instead of https: any of them rejects every token, and the log says the token
+  was not issued for this server rather than that the setting is wrong.
+
+### Scopes at the tool boundary
+
+The transport requires `vault:read` to connect at all, answering a token without
+it with a 403 and an `insufficient_scope` challenge naming what is needed. Write
+tools check `vault:write` per call, in the tool.
+
+That means a read-only connection still sees the write tools listed and is
+refused when it uses one, which is the opposite of the choice made for
+`READ_ONLY`, where the tools are absent. The difference is deliberate:
+`READ_ONLY` is permanent for the deployment, so advertising a tool that can
+never work would be a lie, while an insufficient scope is a property of one
+connection that the client can fix by asking for more.
 
 ## Exercising the write tools by hand
 

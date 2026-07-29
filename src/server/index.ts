@@ -33,19 +33,7 @@ import { TranscriptStore } from "../attachment/transcripts.js";
 import { loadConfig, redactedUrl, remoteUrl, type Config } from "../config.js";
 import { documentUrl, endpointFor, headersFor } from "../couch/rest.js";
 import { createLogger, type Logger } from "./logger.js";
-import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
-
-/** Constant-time string comparison, tolerant of unequal lengths. */
-function timingSafeEqual(a: string, b: string): boolean {
-    const left = new Uint8Array(Buffer.from(a));
-    const right = new Uint8Array(Buffer.from(b));
-    if (left.length !== right.length) {
-        // Still do the work, so the reject path costs the same either way.
-        nodeTimingSafeEqual(left, left);
-        return false;
-    }
-    return nodeTimingSafeEqual(left, right);
-}
+import { createAuthWiring } from "../auth/index.js";
 
 /**
  * Read documents straight from CouchDB.
@@ -183,6 +171,10 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     await builder.rebuild();
     builder.follow();
 
+    const auth = createAuthWiring(config.auth, {
+        onReject: (reason) => log.warn(`Rejected a request: ${reason}`),
+    });
+
     const server = new FastMCP({
         name: "obsidian-vault",
         version: "0.1.0",
@@ -192,28 +184,15 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
             "slightly; every response says how stale it may be, and read_note accepts fresh=true " +
             "when that matters. This server is currently read-only.",
 
-        // The design calls for OAuth 2.0 with PKCE, which is what Claude's
-        // custom connector flow expects. Until that exists, a bearer token
-        // means the service is not relying solely on whatever sits in front of
-        // it. `authenticate` is only consulted for the HTTP transport; on
-        // stdio the transport itself is the boundary.
-        authenticate:
-            config.transport.kind === "http"
-                ? async (request) => {
-                      const presented = request.headers.authorization;
-                      const expected = `Bearer ${config.transport.bearerToken}`;
-                      // Compared in constant time: a naive comparison leaks the
-                      // token's prefix to anyone able to time the responses.
-                      if (!presented || !timingSafeEqual(presented, expected)) {
-                          log.warn("Rejected an unauthenticated request.");
-                          throw new Response("Unauthorized", { status: 401 });
-                      }
-                      return {};
-                  }
-                : undefined,
+        // `authenticate` is only consulted for the HTTP transport; on stdio the
+        // transport itself is the boundary, and `createAuthWiring` returns
+        // nothing to install. The OAuth block is what publishes the protected
+        // resource metadata a client discovers from the 401.
+        ...(auth.authenticate ? { authenticate: auth.authenticate } : {}),
+        ...(auth.oauth ? { oauth: auth.oauth } : {}),
 
-        // Used by the container healthcheck. Deliberately not gated on the
-        // bearer token, and deliberately says nothing about the vault.
+        // Used by the container healthcheck. Deliberately not authenticated,
+        // and deliberately says nothing about the vault.
         health: { enabled: true, path: "/health", message: "ok", status: 200 },
     });
 
@@ -280,6 +259,7 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
             httpStream: { host: config.transport.host, port: config.transport.port },
         });
         log.info(`Serving on http://${config.transport.host}:${config.transport.port}/mcp`);
+        log.info(auth.describe());
     }
 
     if (config.readOnly) {

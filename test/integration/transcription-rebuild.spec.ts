@@ -134,7 +134,8 @@ async function startServer(db: string, run: string, transcriptStore: string): Pr
         planCeiling: 500,
         dailyNotePath: undefined,
         timeZone: "Australia/Brisbane",
-        transport: { kind: "http", host: "127.0.0.1", port, bearerToken: TOKEN },
+        auth: { mode: "bearer", token: TOKEN },
+        transport: { kind: "http", host: "127.0.0.1", port },
         logLevel: "error",
     };
 

@@ -39,6 +39,7 @@ import {
     type WriteReceipt,
 } from "../write/index.js";
 import { UnsyncablePathError } from "../vault-model/index.js";
+import { MissingScopeError, requireScope, SCOPE_WRITE, type SessionAuth } from "../auth/index.js";
 
 export interface WriteToolContext {
     reader: VaultReader;
@@ -108,6 +109,7 @@ async function reporting(work: () => Promise<string>): Promise<string> {
             error instanceof UnsyncablePathError ||
             error instanceof FrontmatterUnreadableError ||
             error instanceof AmbiguousHeadingError ||
+            error instanceof MissingScopeError ||
             error instanceof TimeZoneError ||
             error instanceof DailyNoteUnknownError ||
             error instanceof BinaryTargetError
@@ -145,8 +147,9 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
                 .optional()
                 .describe('Frontmatter properties, e.g. {"tags": ["idea"], "status": "draft"}.'),
         }),
-        execute: async ({ path, content, properties }) =>
+        execute: async ({ path, content, properties }, { session }) =>
             reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
                 const current = await readForWrite(ctx, path);
                 if (current.existed) {
                     return (
@@ -192,8 +195,9 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
                         "content to follow. Defaults to a blank line."
                 ),
         }),
-        execute: async ({ path, content, heading, separator }) =>
+        execute: async ({ path, content, heading, separator }, { session }) =>
             reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
                 const current = await readForWrite(ctx, path);
                 const { text, where } = appended(current.text, content, heading, separator);
 
@@ -241,8 +245,9 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
                     "Placed before the new text when there is already content. Defaults to a blank line."
                 ),
         }),
-        execute: async ({ content, heading, date, separator }) =>
+        execute: async ({ content, heading, date, separator }, { session }) =>
             reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
                 const target = dailyTarget(ctx, date);
                 const current = await readForWrite(ctx, target.path);
                 const { text, where } = appended(current.text, content, heading, separator);
@@ -278,8 +283,9 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
                 .describe("The exact text to replace. Must appear exactly once in the note."),
             replace: z.string().describe("What to put in its place. May be empty to delete the text."),
         }),
-        execute: async ({ path, find, replace }) =>
+        execute: async ({ path, find, replace }, { session }) =>
             reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
                 const current = await readForWrite(ctx, path);
                 if (!current.existed) {
                     return `There is no note at "${path}". Use create_note to make one.`;
@@ -329,8 +335,9 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
                 .describe('Properties to add or overwrite, e.g. {"status": "done"}.'),
             remove: z.array(z.string()).optional().describe("Property names to remove."),
         }),
-        execute: async ({ path, set, remove }) =>
+        execute: async ({ path, set, remove }, { session }) =>
             reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
                 if (!set && !remove) return "Nothing to do: give set, remove, or both.";
 
                 const current = await readForWrite(ctx, path);

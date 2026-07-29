@@ -58,6 +58,7 @@ import {
 } from "../write/index.js";
 import { UnsyncablePathError } from "../vault-model/index.js";
 import { UnwritablePathError } from "../write/executor.js";
+import { MissingScopeError, requireScope, SCOPE_WRITE, type SessionAuth } from "../auth/index.js";
 
 export interface PlanToolContext {
     reader: VaultReader;
@@ -177,6 +178,7 @@ async function reporting(work: () => Promise<string>): Promise<string> {
     } catch (error) {
         if (
             error instanceof EmptySelectionError ||
+            error instanceof MissingScopeError ||
             error instanceof PlanNotFoundError ||
             error instanceof PlanExpiredError ||
             error instanceof PlanAlreadyUsedError ||
@@ -214,8 +216,9 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): void {
                 .optional()
                 .describe("Property names to remove from every selected note."),
         }),
-        execute: async ({ set, remove, ...selection }) =>
+        execute: async ({ set, remove, ...selection }, { session }) =>
             reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
                 if (!set && !remove) return "Nothing to do: give set, remove, or both.";
 
                 const selected = resolve(ctx.index, selection);
@@ -301,8 +304,9 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): void {
         parameters: z.object({
             plan_id: z.string().min(1).describe("The ID printed at the end of the plan."),
         }),
-        execute: async ({ plan_id }) =>
+        execute: async ({ plan_id }, { session }) =>
             reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
                 const result = await ctx.executor.commit(plan_id);
                 if (result.applied.length === 0) {
                     return `Plan ${plan_id} committed, and every note in it already said exactly that. Nothing was written.`;
