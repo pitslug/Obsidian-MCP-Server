@@ -125,6 +125,47 @@ describe("refusing to run", () => {
         expect(result.out).toContain("Every check passed");
         expect(result.code).toBe(0);
     }, 180_000);
+
+    it("refuses to start when the scratch folder is not empty", async () => {
+        // What a --keep run leaves, and what deleting the folder in Obsidian
+        // leaves: a live document and a soft-deleted one. Both still answer a
+        // GET, so both would stop the first create, and both must be listed.
+        const db = nextDb("leftovers");
+        await couch.createDatabase(db);
+        await couch.seed(db, [
+            milestone(["laptop"]),
+            { _id: "mcp-write-check/first.md", type: "plain", children: [], size: 0 },
+            { _id: "mcp-write-check/stale.md", type: "plain", children: [], size: 0, deleted: true },
+        ]);
+
+        const result = await runScript(["--url", couch.url, "--db", db]);
+
+        expect(result.code).toBe(1);
+        expect(result.out).toContain("is not empty");
+        expect(result.out).toContain("mcp-write-check/first.md");
+        expect(result.out).toContain("mcp-write-check/stale.md");
+        expect(result.out).toContain("--reset");
+        // Refusing after replicating would still be a refusal, but a slow one.
+        expect(result.out).not.toContain("Replica ready");
+    }, 120_000);
+
+    it("clears the scratch folder when --reset is passed", async () => {
+        const db = nextDb("reset");
+        await couch.createDatabase(db);
+        await couch.seed(db, [
+            milestone(["laptop"]),
+            { _id: "mcp-write-check/stale.md", type: "plain", children: [], size: 0 },
+        ]);
+
+        const result = await runScript(["--url", couch.url, "--db", db, "--reset", "--keep"]);
+
+        expect(result.out).toContain("Removed 1 document(s) left by an earlier run");
+        expect(result.out).toContain("Every check passed");
+        expect(result.code).toBe(0);
+        // Hard, not soft: a tombstone here would refuse the next run exactly as
+        // the document did, which is the whole point of the flag.
+        expect(await couch.get(db, "mcp-write-check/stale.md")).toBeUndefined();
+    }, 180_000);
 });
 
 describe("a full run", () => {

@@ -39,6 +39,8 @@
  *     --expect-devices once you have looked at why.
  *   - Every path it touches lives under a `mcp-write-check/` folder, and it
  *     deletes what it created on the way out.
+ *   - It refuses to start when that folder is not already empty, rather than
+ *     writing over whatever an earlier run left behind. `--reset` clears it.
  *
  * Those checks run before a single document is composed. See
  * `src/write/scratch.ts`.
@@ -50,6 +52,7 @@
  *     --db obsidian-writetest \
  *     [--passphrase '...'] \
  *     [--expect-devices 1] \
+ *     [--reset] \
  *     [--keep]
  *
  * Prefer setting COUCHDB_URL in the environment over passing a password on the
@@ -84,7 +87,7 @@ import { assertScratchDatabase } from "../src/write/scratch.js";
 import { appendUnderHeading } from "../src/note/sections.js";
 import { editFrontmatter } from "../src/note/frontmatter.js";
 import { civilDateIn, fillTemplate, hostTimeZone, inferDailyFormat } from "../src/note/daily.js";
-import { endpointFor, documentUrl, headersFor } from "../src/couch/rest.js";
+import { endpointFor, databaseUrl, documentUrl, headersFor } from "../src/couch/rest.js";
 import type { CouchConfig } from "../src/config.js";
 
 // ---------------------------------------------------------------------------
@@ -96,6 +99,7 @@ interface Options {
     passphrase: string | undefined;
     expectedDevices: number;
     keep: boolean;
+    reset: boolean;
 }
 
 class VerificationStopped extends Error {
@@ -143,6 +147,7 @@ function parseArgs(argv: string[]): Options {
         passphrase: get("passphrase") ?? process.env.LIVESYNC_PASSPHRASE,
         expectedDevices: Number(get("expect-devices") ?? 1),
         keep: argv.includes("--keep"),
+        reset: argv.includes("--reset"),
     };
 }
 
@@ -232,6 +237,76 @@ class Verifier {
 
         const file = assembleFile(entry, chunks);
         return file.kind === "text" ? file.text : undefined;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The scratch folder, between runs
+// ---------------------------------------------------------------------------
+
+interface Leftover {
+    id: string;
+    rev: string;
+}
+
+/**
+ * Whatever is currently sitting under the scratch folder.
+ *
+ * A range over `_all_docs` rather than a GET per path this run knows about: a
+ * run that failed partway leaves whatever it had reached, and an older version
+ * of this script used names this one does not. The question worth asking is
+ * "is the folder empty", not "are the seven documents I am about to write
+ * absent".
+ *
+ * Soft-deleted documents are included, and that is the point. LiveSync deletes
+ * by writing `deleted: true` and keeping the document, so a folder deleted in
+ * Obsidian still has a document at every path, a plain GET still returns 200,
+ * and a create asserting absence still fails. Only a hard delete is invisible
+ * here, which is what this script's own cleanup does.
+ */
+async function leftoversUnder(couch: CouchConfig, folder: string): Promise<Leftover[]> {
+    const endpoint = endpointFor(couch);
+    const url = databaseUrl(endpoint, "_all_docs");
+    url.searchParams.set("startkey", JSON.stringify(`${folder}/`));
+    // U+FFF0 sorts after anything a vault path contains, which is CouchDB's
+    // own idiom for "every key with this prefix".
+    url.searchParams.set("endkey", JSON.stringify(`${folder}/\uFFF0`));
+
+    const response = await fetch(url, { method: "GET", headers: headersFor(endpoint) });
+    if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(
+            `Could not list "${folder}/" in "${couch.database}": ` +
+                `${response.status} ${response.statusText}` +
+                (body ? `\n    ${body.slice(0, 300)}` : "")
+        );
+    }
+
+    const body = (await response.json()) as { rows?: { id: string; value?: { rev?: string } }[] };
+    return (body.rows ?? [])
+        .filter((row) => typeof row.value?.rev === "string")
+        .map((row) => ({ id: row.id, rev: row.value?.rev as string }));
+}
+
+/**
+ * Remove leftovers properly, which means `_deleted` rather than `deleted`.
+ *
+ * A soft delete would leave exactly the problem it was called to solve.
+ */
+async function hardDelete(couch: CouchConfig, docs: readonly Leftover[]): Promise<void> {
+    const endpoint = endpointFor(couch);
+    for (const doc of docs) {
+        const response = await fetch(documentUrl(endpoint, doc.id, { rev: doc.rev }), {
+            method: "DELETE",
+            headers: headersFor(endpoint),
+        });
+        if (!response.ok && response.status !== 404) {
+            const body = await response.text().catch(() => "");
+            throw new Error(
+                `Could not remove "${doc.id}": ${response.status} ${response.statusText}` +
+                    (body ? `\n    ${body.slice(0, 300)}` : "")
+            );
+        }
     }
 }
 
@@ -334,6 +409,34 @@ async function main() {
                 `compression=${settings.enableCompression} splitter=${settings.chunkSplitterVersion}`
         )
     );
+
+    // --- The scratch folder, before anything is written ---------------------
+    //
+    // Last of the refusals, and first of the things that costs a request. It
+    // has to happen here rather than at the first write: replicating the whole
+    // database takes a minute or two, and discovering afterwards that the run
+    // was never going to start is a minute spent for nothing.
+
+    const leftovers = await leftoversUnder(options.couch, FOLDER);
+    if (leftovers.length > 0 && !options.reset) {
+        fail(
+            `"${FOLDER}/" is not empty in "${options.couch.database}": ` +
+                `${leftovers.length} document(s) are already there.\n\n` +
+                leftovers.map((doc) => `    ${doc.id}`).join("\n") +
+                `\n\n  A previous run with --keep left them. The first thing this script does is ` +
+                `create a note asserting nothing is at its path, so it would stop at the first ` +
+                `write rather than overwrite one of them.\n\n` +
+                `  Deleting the folder in Obsidian does not clear this. LiveSync deletes by ` +
+                `writing "deleted: true" and keeping the document, so every path still has one ` +
+                `and a plain GET still returns it.\n\n` +
+                `  Re-run with --reset to remove them properly first.`
+        );
+    }
+    if (leftovers.length > 0) {
+        console.log(heading("Clearing the scratch folder"));
+        await hardDelete(options.couch, leftovers);
+        console.log(ok(`Removed ${leftovers.length} document(s) left by an earlier run`));
+    }
 
     // --- The stack ----------------------------------------------------------
 
@@ -793,7 +896,14 @@ async function main() {
             }
         } else {
             console.log(heading("Left in place"));
-            console.log(info(`--keep was passed. Delete ${FOLDER}/ from Obsidian when you are done.`));
+            console.log(
+                info(
+                    `--keep was passed, so ${FOLDER}/ is still there to look at. Delete it in ` +
+                        `Obsidian when you are done, and run this again with --reset when you ` +
+                        `next need the gate: an Obsidian delete is a soft one, and leaves a ` +
+                        `document at every path that a fresh run would refuse to write over.`
+                )
+            );
         }
 
         await replicator.stop().catch(() => undefined);

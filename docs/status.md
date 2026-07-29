@@ -439,6 +439,13 @@ those notes. The script finishes by printing exactly what should appear in
 Obsidian and where. Open the vault and compare. Delete `mcp-write-check/` from
 Obsidian when you are satisfied.
 
+Then pass `--reset` on the next run. Deleting the folder in Obsidian does not
+make the database ready for another go: LiveSync deletes by writing
+`deleted: true` and keeping the document, so every path still has one, a plain
+GET still returns it, and the first create asserts absence. Without `--reset`
+the script now says so before it replicates, rather than at the first write a
+minute later.
+
 Only when both halves have passed does anything point at `obsidiandb`, and it
 does so with `READ_ONLY` on for a first period.
 
