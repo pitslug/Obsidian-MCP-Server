@@ -67,7 +67,7 @@ export function registerTools(server: FastMCP, ctx: ToolContext): void {
                 `Writes: ${
                     ctx.readOnly
                         ? "disabled (read-only), so no registered tool can modify the vault"
-                        : "enabled (create_note, append_note, edit_note, set_properties)"
+                        : "enabled (create_note, append_note, edit_note, set_properties, delete_note)"
                 }`,
                 `Encryption: ${ctx.settings.encrypt ? "on" : "off"}` +
                     (ctx.settings.usePathObfuscation ? ", path obfuscation on" : ""),

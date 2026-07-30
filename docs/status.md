@@ -18,7 +18,7 @@ work.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 592 tests, ~85s
+npm test          # 599 tests, ~85s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -38,7 +38,7 @@ environment, or from Docker secrets in deployment. This repo is public.
 | Index            | SQLite FTS5: search, properties, tags, link graph                                                                |
 | Attachments      | PDF text extraction, indexed and retrievable                                                                     |
 | Handwriting      | Transcriptions stored durably, indexed, survive an index rebuild                                                 |
-| Tools            | Thirteen read tools, plus eight write tools registered only when `READ_ONLY=false`                               |
+| Tools            | Thirteen read tools, plus nine write tools registered only when `READ_ONLY=false`                                |
 | Write executor   | Built and tested: single-note writes, deletes, and the plan/commit protocol. Both halves now have a tool surface |
 | Daily notes      | Path template inferred from the vault's own dated filenames, overridable, resolved in a configured time zone     |
 | Acceptance gate  | Met. Step three re-run end to end against `obsidian-writetest` on 29 July 2026, and confirmed in Obsidian         |
@@ -52,12 +52,20 @@ Thirteen read tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
 `note_links`, `vault_health`, `get_attachment`, `list_untranscribed`,
 `save_transcription`.
 
-Eight write tools, registered only when `READ_ONLY=false`. Five write a single
+Nine write tools, registered only when `READ_ONLY=false`. Six act on a single
 note: `create_note`, `append_note`, `append_daily`, `edit_note`,
-`set_properties`. Three are the batch path: `plan_set_properties` writes
-nothing and returns a plan, `commit_plan` applies one by ID, `discard_plan`
-throws one away. Absent rather than disabled, so a read-only server does not
-advertise something it will refuse.
+`set_properties`, `delete_note`. Three are the batch path: `plan_set_properties`
+writes nothing and returns a plan, `commit_plan` applies one by ID,
+`discard_plan` throws one away. Absent rather than disabled, so a read-only
+server does not advertise something it will refuse.
+
+`delete_note` is soft only, with no flag to make it otherwise, and that is not
+timidity. The tombstone a soft delete leaves is what tells another device to
+remove its copy; erase the document instead and a device that was offline still
+holds the note, learns nothing on reconnecting, and pushes it back. The
+recoverable option is also the only one that actually deletes. It refuses
+attachments, because a transcription is the only thing here that cannot be
+recomputed.
 
 Every one of them reads the note fresh from CouchDB and writes against the exact
 revision it read, in one observation. That is the whole reason
@@ -165,12 +173,13 @@ machines. Rough priority order within each group.
 
 ### Parity with OneNote, which is what decides the migration
 
-- [ ] **A delete tool.** `PlanningWriteExecutor.remove` already does this, is
-      tested, soft-deletes by default and takes an opt-in `hard` flag, and the
-      gate exercises delete then write-over-the-tombstone. No MCP tool exposes
-      it, so a note created by mistake cannot be removed through the server.
-      OneNote has `delete_page`. Thin work: a tool definition, the `vault:write`
-      scope check, and tests. Do this before any content moves across.
+- [x] **A delete tool.** `delete_note`, 30 July 2026. Soft only, refuses
+      attachments, and the scope check is now enforced mechanically for every
+      tool in `write-tools.ts` by `test/write/surface.spec.ts` rather than by
+      remembering. Adding it found a bug it did not cause: `create_note`
+      asserted absence with a hardcoded `null` revision, so any path holding a
+      tombstone refused new content with a conflict that re-reading the note
+      could not explain. Deleting a note in Obsidian was enough to reach it.
 - [ ] **Decide what a move or rename means here, then build it.** OneNote has
       `move_page` and `copy_page`; nothing here can relocate a note, and
       reorganising as you go is most of what migrating is. The design question
@@ -191,10 +200,10 @@ machines. Rough priority order within each group.
 
 ### Finishing the deployment
 
-- [ ] **Tag `v0.1.1`.** `v0.1.0` sits at `e7bd3b0`, so the runbook fix and the
-      roots fix are not in the running image. The compose file pins `:0.1` and
-      that tag moves, so a tag plus `docker compose pull obsidian-mcp` is the
-      whole job. No compose edit.
+- [x] **Tag `v0.1.1`.** Tagged at `929a2ba`, 30 July 2026. The compose file pins
+      `:0.1` and that tag moves, so `docker compose pull obsidian-mcp` on the
+      server is what puts it in the running container. Nothing in the container
+      reports its own version, so confirm the pull rather than assuming it.
 - [ ] Homepage entry.
 - [ ] Uptime Kuma monitor against `http://obsidian-mcp:8080/health` on
       `docker_net`. Not `/mcp`, which correctly answers 401 and would read as
@@ -384,6 +393,19 @@ server with `READ_ONLY=false`.
   copy of the note, and pull replication never repairs it because `_revs_diff`
   reports nothing missing. Reads keep returning the right winner, which is what
   makes it easy to miss. `withAncestry` in `src/write/executor.ts` supplies it.
+- **A tombstone is not an absence, and the tool layer treated it as one.**
+  Adding `delete_note` on 30 July 2026 exposed `create_note` asserting
+  `expectedRev: null` instead of the revision it had just read. A path whose
+  note was deleted still holds a document, so CouchDB refused the create as a
+  conflict, and the advice in the error was useless: reading the note again
+  reports nothing there, so the obvious next attempt is the same failing one.
+  Deleting a note in Obsidian was enough to reach it, so this was live before
+  anything here could delete. Fixed in both halves: the not-found path in
+  `write-tools.ts` now asks the executor for the tombstone's revision, and
+  `create_note` passes the revision it read like every other tool. The lesson
+  generalises past this bug. `NoteNotFoundError` means "nothing to read here",
+  which is not the same claim as "nothing is here", and any code that treats the
+  first as the second is one deleted note away from being wrong.
 - **Traefik 400s a percent-encoded slash, so the public CouchDB hostname is
   unusable for anything that addresses a document by ID.** A document ID here is
   the vault path, so `daily/2026-07-28.md` is requested as

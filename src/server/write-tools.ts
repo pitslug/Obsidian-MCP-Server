@@ -22,6 +22,15 @@
  * failing, for the same reason the read-only build has no stubs: a tool that
  * reports "not implemented" gets tried anyway, and the person is left believing
  * writing is a configuration away when it is a decision away.
+ *
+ * **Deleting is soft, and `delete_note` has no option to make it otherwise.**
+ * The executor takes a `hard` flag because the verifier needs one; a tool does
+ * not, and the reason is not squeamishness about permanence. A soft delete
+ * leaves a tombstone, and the tombstone is what tells every other device to
+ * remove its copy. Erase the document instead and a device that was offline at
+ * the time still holds the note, learns nothing on reconnecting, and pushes it
+ * back: the delete appears to work and quietly undoes itself later. So the
+ * reversible option is also the only one that actually deletes.
  */
 
 import { z } from "zod";
@@ -33,8 +42,10 @@ import { AmbiguousHeadingError, appendUnderHeading } from "../note/sections.js";
 import { civilDateIn, fillTemplate, inferDailyFormat, TimeZoneError } from "../note/daily.js";
 import type { VaultIndex } from "../index/index.js";
 import {
+    LegacyDeletionError,
     RevisionConflictError,
     UnwritablePathError,
+    WriteTargetMissingError,
     type WriteExecutor,
     type WriteReceipt,
 } from "../write/index.js";
@@ -62,24 +73,49 @@ interface CurrentNote {
 }
 
 /**
- * Read a note for the purpose of writing it back.
+ * What is at a path right now, whatever kind of file it is.
  *
  * `fresh: true` is not optional here. The replica is typically sub-second
  * behind, and a write composed from a copy that is even briefly stale is a lost
  * update that no conflict check can catch, because the revision would be stale
- * in exactly the same way.
+ * in exactly the same way. The same applies to a revision used to delete.
  */
-async function readForWrite(ctx: WriteToolContext, path: string): Promise<CurrentNote> {
+async function readCurrent(ctx: WriteToolContext, path: string): Promise<CurrentNote & { binary: boolean }> {
     try {
         const { file } = await ctx.reader.read(path, { fresh: true });
-        if (file.kind === "binary") {
-            throw new BinaryTargetError(path);
-        }
-        return { text: file.text, rev: file.rev ?? null, existed: true };
+        return {
+            text: file.kind === "text" ? file.text : "",
+            rev: file.rev ?? null,
+            existed: true,
+            binary: file.kind === "binary",
+        };
     } catch (error) {
-        if (error instanceof NoteNotFoundError) return { text: "", rev: null, existed: false };
+        if (error instanceof NoteNotFoundError) {
+            // A deleted note is not there to read and is emphatically still
+            // there to write against. The tombstone holds a revision, and a
+            // write that asserts absence instead of superseding it is refused
+            // by CouchDB with a conflict the caller cannot resolve: re-reading
+            // the note reports nothing there, so the obvious next attempt is
+            // the same failing one. Deleting a note in Obsidian is enough to
+            // reach this, which is why it is handled here rather than in the
+            // tool that just learned how to make tombstones.
+            const tombstone = await ctx.executor.currentEntry(path);
+            return { text: "", rev: tombstone?._rev ?? null, existed: false, binary: false };
+        }
         throw error;
     }
+}
+
+/**
+ * Read a note for the purpose of writing it back.
+ *
+ * Refuses an attachment, because every tool that uses this composes new text
+ * and an attachment would have to be replaced wholesale.
+ */
+async function readForWrite(ctx: WriteToolContext, path: string): Promise<CurrentNote> {
+    const current = await readCurrent(ctx, path);
+    if (current.binary) throw new BinaryTargetError(path);
+    return { text: current.text, rev: current.rev, existed: current.existed };
 }
 
 class BinaryTargetError extends Error {
@@ -112,7 +148,9 @@ async function reporting(work: () => Promise<string>): Promise<string> {
             error instanceof MissingScopeError ||
             error instanceof TimeZoneError ||
             error instanceof DailyNoteUnknownError ||
-            error instanceof BinaryTargetError
+            error instanceof BinaryTargetError ||
+            error instanceof WriteTargetMissingError ||
+            error instanceof LegacyDeletionError
         ) {
             return error.message;
         }
@@ -126,6 +164,25 @@ function describe(receipt: WriteReceipt, what: string): string {
         `${what} "${receipt.path}".\n` +
         `Revision ${receipt.rev}, ${receipt.size.toLocaleString()} bytes, ` +
         `${receipt.chunksWritten} chunk(s) written and ${receipt.chunksReused} reused.` +
+        (receipt.replicaPatchError ? `\n\nNote: ${receipt.replicaPatchError}` : "")
+    );
+}
+
+/**
+ * What a delete did, said in a way that does not imply an undo.
+ *
+ * `describe` would report zero chunks written and zero reused, which for a
+ * deletion reads as though something went wrong. What matters instead is that
+ * the note is gone from every device, that a tombstone is what made that
+ * happen, and that this server has no way to put the text back.
+ */
+function describeDeletion(receipt: WriteReceipt): string {
+    return (
+        `Deleted "${receipt.path}".\n` +
+        `Revision ${receipt.rev}, ${receipt.size.toLocaleString()} bytes removed. Marked deleted ` +
+        `rather than erased, which is how the sync plugin does it: every device removes its copy ` +
+        `on the next sync and the document stays behind as the record of that. Restoring the text ` +
+        `is not something this server can do.` +
         (receipt.replicaPatchError ? `\n\nNote: ${receipt.replicaPatchError}` : "")
     );
 }
@@ -160,10 +217,16 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
 
                 const text = properties ? editFrontmatter(path, content, { set: properties }).text : content;
 
+                // The revision read above, not a hardcoded null. They differ in
+                // exactly one case: a path whose note was deleted still has a
+                // tombstone, and asserting absence against it is a conflict
+                // rather than a create. The guard above is what keeps this from
+                // overwriting a live note; the revision is what lets a path be
+                // used again after something was deleted from it.
                 const receipt = await ctx.executor.write({
                     path,
                     content: { kind: "text", text },
-                    expectedRev: null,
+                    expectedRev: current.rev,
                 });
                 return describe(receipt, "Created");
             }),
@@ -367,6 +430,49 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
                 ].filter(Boolean);
 
                 return `${describe(receipt, "Updated properties on")}\nProperties ${parts.join("; ")}.`;
+            }),
+    });
+
+    server.addTool({
+        name: "delete_note",
+        description:
+            "Delete a note from the Obsidian vault. Use this for a note that should not exist: " +
+            "one created here by mistake, or a draft that has been folded into another note. The " +
+            "note is marked deleted, the way the sync plugin does it, so every device removes its " +
+            "copy on the next sync. This cannot be undone through this server, and the vault is " +
+            "the user's own record, so read the note first and say what is being removed rather " +
+            "than deleting on an assumption.",
+        parameters: z.object({
+            path: z.string().describe("Vault-relative path including the .md extension."),
+        }),
+        execute: async ({ path }, { session }) =>
+            reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
+                const current = await readCurrent(ctx, path);
+
+                if (!current.existed) {
+                    return (
+                        `There is no note at "${path}", so there is nothing to delete. ` +
+                        `Check the path with list_notes or search_notes.`
+                    );
+                }
+                if (current.binary) {
+                    return (
+                        `"${path}" is an attachment, not a text note, and this tool does not remove ` +
+                        `attachments. A transcription of one is the only thing in this vault that ` +
+                        `cannot be recomputed, so removing the file it belongs to is a decision to ` +
+                        `make in Obsidian.`
+                    );
+                }
+                if (!current.rev) {
+                    return (
+                        `Could not establish the current revision of "${path}", so nothing was ` +
+                        `deleted. Read the note again and retry.`
+                    );
+                }
+
+                const receipt = await ctx.executor.remove({ path, expectedRev: current.rev });
+                return describeDeletion(receipt);
             }),
     });
 }

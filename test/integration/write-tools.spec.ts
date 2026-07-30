@@ -144,6 +144,19 @@ beforeAll(async () => {
         ]);
     }
 
+    // An attachment, so there is something in the vault that is not a text
+    // note for the tools to refuse. Deleting one would orphan a transcription,
+    // which is the only thing in this system that cannot be recomputed.
+    const attachment = await composeWrite(
+        "attachments/scan.png",
+        { kind: "binary", bytes: new Uint8Array(64).fill(9) },
+        { settings: SETTINGS, now: 1_700_000_000_000 }
+    );
+    await couch.seed("vault", [
+        ...(attachment.chunks as unknown as Record<string, unknown>[]),
+        attachment.entry as unknown as Record<string, unknown>,
+    ]);
+
     const transport = new StdioClientTransport({
         command: process.execPath,
         args: ["--import", "tsx", entrypoint],
@@ -182,6 +195,7 @@ describe("the write surface", () => {
             "append_daily",
             "edit_note",
             "set_properties",
+            "delete_note",
             "plan_set_properties",
             "commit_plan",
             "discard_plan",
@@ -194,6 +208,7 @@ describe("the write surface", () => {
         const out = await call("vault_status", {});
         expect(out).toContain("Writes: enabled");
         expect(out).toContain("create_note");
+        expect(out).toContain("delete_note");
     });
 });
 
@@ -521,5 +536,72 @@ describe("plan_set_properties", () => {
 
         expect(await call("discard_plan", { plan_id: planId })).toContain("discarded");
         expect(await call("commit_plan", { plan_id: planId })).toContain("No plan with ID");
+    });
+});
+
+/**
+ * Deleting, which is the one write whose mistake cannot be walked back here.
+ *
+ * Last in the file on purpose. This vault is shared across the whole spec in
+ * order, so a test that removes a seeded note would change what the selector
+ * tests above match. Each of these creates what it then deletes.
+ */
+describe("delete_note", () => {
+    it("removes a note and leaves the tombstone that tells other devices to", async () => {
+        await call("create_note", { path: "notes/doomed.md", content: "Not for long.\n" });
+        expect(await inVault("notes/doomed.md")).toBe("Not for long.\n");
+
+        const out = await call("delete_note", { path: "notes/doomed.md" });
+
+        expect(out).toContain("Deleted");
+        expect(out).toContain("bytes removed");
+        expect(await inVault("notes/doomed.md")).toBeUndefined();
+
+        // Soft rather than erased, and the difference is not cosmetic: the
+        // tombstone is the only thing that makes a device which was offline
+        // remove its copy instead of pushing the note back.
+        const raw = (await couch.get("vault", "notes/doomed.md")) as { deleted?: boolean } | undefined;
+        expect(raw?.deleted).toBe(true);
+    });
+
+    it("frees the path for a new note", async () => {
+        await call("create_note", { path: "notes/reused.md", content: "first life\n" });
+        await call("delete_note", { path: "notes/reused.md" });
+
+        const out = await call("create_note", { path: "notes/reused.md", content: "second life\n" });
+
+        expect(out).toContain("Created");
+        expect(await inVault("notes/reused.md")).toBe("second life\n");
+    });
+
+    it("frees the path for an append, which creates the note again", async () => {
+        await call("create_note", { path: "notes/reappended.md", content: "first life\n" });
+        await call("delete_note", { path: "notes/reappended.md" });
+
+        const out = await call("append_note", { path: "notes/reappended.md", content: "second life\n" });
+
+        expect(out).toContain("Created");
+        expect(await inVault("notes/reappended.md")).toBe("second life\n");
+    });
+
+    it("says there is nothing to delete rather than reporting a success", async () => {
+        const out = await call("delete_note", { path: "notes/never-existed.md" });
+
+        expect(out).toContain("nothing to delete");
+        expect(out).not.toContain("Deleted");
+    });
+
+    it("does not delete the same note twice", async () => {
+        await call("create_note", { path: "notes/twice.md", content: "once\n" });
+
+        expect(await call("delete_note", { path: "notes/twice.md" })).toContain("Deleted");
+        expect(await call("delete_note", { path: "notes/twice.md" })).toContain("nothing to delete");
+    });
+
+    it("refuses an attachment, which is not its to remove", async () => {
+        const out = await call("delete_note", { path: "attachments/scan.png" });
+
+        expect(out).toContain("attachment");
+        expect(await couch.get("vault", "attachments/scan.png")).toBeTruthy();
     });
 });

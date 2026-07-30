@@ -67,4 +67,22 @@ describe("the write surface", () => {
 
         expect(offenders, `These build their own requests:\n${offenders.join("\n")}`).toEqual([]);
     });
+
+    it("checks the write scope in every tool that changes the vault", () => {
+        // The check is per call, inside the tool, because the token arrives per
+        // session. That makes omitting one a single missing line with no
+        // visible symptom until a connection holding only vault:read deletes
+        // something. A tool added here without it should fail this test rather
+        // than pass review.
+        const source = read("src/server/write-tools.ts");
+        const unchecked = source
+            .split("server.addTool({")
+            .slice(1)
+            .filter(
+                (block) => !block.includes("requireScope(session as SessionAuth | undefined, SCOPE_WRITE)")
+            )
+            .map((block) => /name:\s*"([^"]+)"/.exec(block)?.[1] ?? "an unnamed tool");
+
+        expect(unchecked, `These write tools do not check vault:write:\n${unchecked.join("\n")}`).toEqual([]);
+    });
 });
