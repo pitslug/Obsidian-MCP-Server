@@ -218,7 +218,7 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     registerTools(server, toolContext);
     registerAttachmentTool(server, toolContext);
     registerTranscriptionTools(server, toolContext);
-    registerSearchTools(server, { index });
+    registerSearchTools(server, { index, reader, log });
 
     // The write tools are registered only when writing is enabled, rather than
     // registered and refusing. A tool that answers "read-only mode" is a tool a

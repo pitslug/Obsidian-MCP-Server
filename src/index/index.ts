@@ -144,6 +144,9 @@ export class VaultIndex {
             deleteTags: this.db.prepare(`DELETE FROM tags WHERE path = ?`),
             insertTag: this.db.prepare(`INSERT INTO tags (path, tag) VALUES (?, ?)`),
             deleteLinks: this.db.prepare(`DELETE FROM links WHERE source_path = ?`),
+            unresolveLinksTo: this.db.prepare(
+                `UPDATE links SET resolved_path = NULL WHERE resolved_path = ?`
+            ),
             insertLink: this.db.prepare(
                 `INSERT INTO links (source_path, target, resolved_path, subpath, alias, embed)
                  VALUES (?, ?, ?, ?, ?, ?)`
@@ -301,11 +304,28 @@ export class VaultIndex {
         return removed;
     }
 
+    /**
+     * Forget a file.
+     *
+     * The note's properties, tags and outgoing links go with it through
+     * `ON DELETE CASCADE`, so this deletes two rows and gets five tables. The
+     * full-text row is the exception because an FTS5 virtual table cannot carry
+     * a foreign key.
+     *
+     * Links *pointing at* this path are kept, with their resolution cleared.
+     * They belong to notes that still exist, so deleting them would lose real
+     * content, and leaving them resolved is worse than either: the link would
+     * keep naming a note the vault no longer holds, `note_links` would report it
+     * as resolved, and `vault_health` would not report it at all. Cleared, it
+     * shows up as the broken link it now is, which is what someone who deleted a
+     * note three others point at needs to be told.
+     */
     remove(path: string): void {
         this.db.exec("BEGIN");
         try {
             this.statements.deleteNote?.run(path);
             this.statements.deleteFts?.run(path);
+            this.statements.unresolveLinksTo?.run(path);
             this.db.exec("COMMIT");
         } catch (error) {
             this.db.exec("ROLLBACK");

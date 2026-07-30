@@ -18,7 +18,7 @@ work.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 599 tests, ~85s
+npm test          # 614 tests, ~85s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -71,6 +71,34 @@ Every one of them reads the note fresh from CouchDB and writes against the exact
 revision it read, in one observation. That is the whole reason
 `WriteRequest.expectedRev` is required: a tool that let the executor look the
 revision up would succeed every time and lose an edit occasionally.
+
+## A deleted note cannot come back as an answer
+
+The counterpart to being able to delete: search must not then hand the note back
+as context for a question. Being asked about something you deliberately removed
+is worse than a missing answer, and it is not a hypothetical, because search is
+served by the index rather than the vault. The changes feed removes a deleted
+note from the index within the second, and the feed can also fail, at which point
+`builder.ts` logs it, stops following, and search goes on answering from a set of
+notes that is quietly frozen. Nothing in the answer would look wrong.
+
+So the index proposes and the vault decides. Every tool that returns paths from
+the index (`search_notes`, `find_by_property`, `find_by_tag`, `note_links`,
+`vault_health`) confirms them against the replica first, through
+`VaultReader.live`, which reads the file documents and no chunks. A path the
+vault no longer holds is dropped from the answer and removed from the index on
+the way past, so reading repairs. `src/server/confirm.ts` holds the reasoning.
+
+Three consequences worth knowing:
+
+- The answer says how many results were left out and **never which**. Naming a
+  deleted note in a search result is the leak in miniature, and a path is enough
+  for a model to repeat it or go looking. The paths go to the log instead.
+- `note_links` refuses outright for a deleted note, because a note's links are
+  its content.
+- `property_inventory` and `tag_inventory` aggregate and return no paths to
+  confirm, so they are the one surface still relying on the feed having been
+  applied. They report counts and property values, not note paths.
 
 The batch path has the same requirement and it is easier to miss there.
 `plan_set_properties` reads each note to compose its new frontmatter, and
@@ -226,6 +254,12 @@ has the detail. Switch one is done and is meant to be lived with.
 
 ### Smaller things, whenever
 
+- [ ] **The index changes feed does not restart itself.** On an error it logs,
+      sets `following = false`, and stays dead until the process restarts. The
+      confirmation step means a dead feed can no longer surface a deleted note,
+      so this is now a staleness problem rather than a correctness one: new and
+      edited notes stop being findable. Reconnect with backoff, and treat a
+      repeated "Index held X, which the vault does not" warning as the symptom.
 - [ ] `get_attachment` refuses an attachment over `ATTACHMENT_SIZE_CAP` but will
       still serve a stored transcription for it. Untested; add one.
 - [ ] E2EE is not enabled on the vault. The code handles it and the differential
@@ -393,6 +427,19 @@ server with `READ_ONLY=false`.
   copy of the note, and pull replication never repairs it because `_revs_diff`
   reports nothing missing. Reads keep returning the right winner, which is what
   makes it easy to miss. `withAncestry` in `src/write/executor.ts` supplies it.
+- **The index is a cache, and its failure mode is not lag but persistence.** It
+  can hold a note the vault does not, which no amount of correctness in the
+  delete path prevents: the feed that would tell it can die, and does so with a
+  log line and no other symptom. So an index result is a candidate rather than an
+  answer. Two things follow that were not obvious before writing it. Confirming
+  costs one shallow lookup per result set, not per result, so the honest version
+  is affordable. And the check is the only moment when something has both noticed
+  the staleness and knows which path it is, which is why it repairs the index
+  rather than logging and moving on.
+- **A guard that names what it withheld has not withheld it.** The first version
+  of the staleness line listed the paths it had dropped, which put a deleted
+  note's path back into the answer that exists to keep it out. Caught by a test
+  asserting the path was absent from the output, not by reading the code.
 - **A tombstone is not an absence, and the tool layer treated it as one.**
   Adding `delete_note` on 30 July 2026 exposed `create_note` asserting
   `expectedRev: null` instead of the revision it had just read. A path whose

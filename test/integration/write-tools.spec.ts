@@ -49,6 +49,22 @@ function textOf(result: unknown): string {
 const call = (name: string, args: Record<string, unknown>) =>
     client.callTool({ name, arguments: args }).then(textOf);
 
+/**
+ * Poll until something becomes true, for the cases that wait on the feed.
+ *
+ * Used only where the assertion genuinely depends on the changes feed having
+ * been applied. Where the point of a test is that an answer is correct
+ * *without* waiting, it asserts immediately and this is deliberately not used.
+ */
+async function until(predicate: () => Promise<boolean>, ms = 10_000): Promise<void> {
+    const deadline = Date.now() + ms;
+    for (;;) {
+        if (await predicate()) return;
+        if (Date.now() > deadline) throw new Error("Timed out waiting for the index to catch up.");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+}
+
 /** Read a note out of CouchDB, through the vault model, as a device would. */
 async function inVault(path: string): Promise<string | undefined> {
     const raw = await couch.get("vault", path);
@@ -603,5 +619,51 @@ describe("delete_note", () => {
 
         expect(out).toContain("attachment");
         expect(await couch.get("vault", "attachments/scan.png")).toBeTruthy();
+    });
+});
+
+/**
+ * The property that matters more than the delete tool itself.
+ *
+ * A deleted note must not come back as context for a question, and the search
+ * index is a cache that can outlive one: the changes feed removes a deleted note
+ * promptly, but it can fail, and search would then keep answering from a frozen
+ * set of notes with nothing in the answer looking wrong. So the tools confirm
+ * their results against the replica, and these tests assert the outcome
+ * immediately after the delete rather than polling, because "eventually stops
+ * appearing" is not the guarantee being claimed.
+ */
+describe("a deleted note stops being findable", () => {
+    const path = "notes/confidential.md";
+    const body = "---\nstatus: confidential\ntags: [private]\n---\n\nThe zygomorphic pretzel policy.\n";
+
+    it("leaves search, the selectors and the link graph at once", async () => {
+        await call("create_note", { path, content: `${body}\nSee [[structured]].\n` });
+        await until(async () => (await call("search_notes", { query: "zygomorphic" })).includes(path));
+
+        await call("delete_note", { path });
+
+        // No polling. The replica has the tombstone by the time the delete
+        // returns, and confirmation is what turns that into a correct answer
+        // without waiting for the index to be told.
+        expect(await call("search_notes", { query: "zygomorphic" })).not.toContain(path);
+        expect(await call("find_by_property", { key: "status", value: "confidential" })).not.toContain(path);
+        expect(await call("find_by_tag", { tag: "private" })).not.toContain(path);
+
+        // Its links are its content, so the graph must not answer for it either.
+        expect(await call("note_links", { path })).toContain("no note at");
+    });
+
+    it("and read_note refuses it, which is the authoritative answer", async () => {
+        expect(await call("read_note", { path, fresh: true })).toMatch(/no note|not found/i);
+    });
+
+    it("stops being counted once the feed catches up", async () => {
+        // The inventories aggregate over the index and return no paths to
+        // confirm, so they are the one surface that still depends on the feed
+        // having been applied. Worth stating plainly rather than implying the
+        // guarantee above extends to them.
+        await until(async () => !(await call("tag_inventory", {})).includes("private"));
+        expect(await call("tag_inventory", {})).not.toContain("private");
     });
 });

@@ -5,14 +5,24 @@
  * singled out in the design: it shows what property keys and value shapes
  * already exist across the vault, so a schema can be proposed from what is
  * there rather than guessed at.
+ *
+ * Every tool here that returns paths confirms them against the replica before
+ * returning them, and drops the stale ones from the index on the way past. See
+ * `confirm.ts` for why that is worth a lookup: the index can outlive a deleted
+ * note, and a deleted note used as context for a question is the one wrong
+ * answer this server must not give.
  */
 
 import { z } from "zod";
 import type { FastMCP } from "fastmcp";
 import type { VaultIndex } from "../index/index.js";
+import type { VaultReader } from "../vault/reader.js";
+import { confirmLive, staleness, type ConfirmContext } from "./confirm.js";
 
-export interface SearchToolContext {
+export interface SearchToolContext extends ConfirmContext {
     index: VaultIndex;
+    reader: VaultReader;
+    log?: { warn(message: string): void };
 }
 
 function formatBytes(bytes: number): string {
@@ -51,17 +61,27 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
                 );
             }
 
-            if (hits.length === 0) {
+            const confirmed = await confirmLive(ctx, hits, (hit) => hit.path);
+
+            if (confirmed.rows.length === 0) {
                 const scope = [folder ? `under "${folder}"` : "", tag ? `tagged #${tag}` : ""]
                     .filter(Boolean)
                     .join(", ");
-                return `No notes match ${JSON.stringify(query)}${scope ? ` ${scope}` : ""}.`;
+                return [
+                    `No notes match ${JSON.stringify(query)}${scope ? ` ${scope}` : ""}.`,
+                    ...staleness(confirmed.dropped),
+                ].join("\n");
             }
 
-            const lines = hits.map(
+            const lines = confirmed.rows.map(
                 (hit) => `${hit.path}  (${day(hit.mtime)})\n    ${hit.snippet.replace(/\s+/g, " ").trim()}`
             );
-            return [...lines, "", `${hits.length} result(s).`].join("\n");
+            return [
+                ...lines,
+                "",
+                `${confirmed.rows.length} result(s).`,
+                ...staleness(confirmed.dropped),
+            ].join("\n");
         },
     });
 
@@ -123,14 +143,21 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
             value: z.string().optional().describe("Optional exact value, e.g. 'done'."),
         }),
         execute: async ({ key, value }) => {
-            const notes = ctx.index.findByProperty(key, value);
+            const { rows: notes, dropped } = await confirmLive(
+                ctx,
+                ctx.index.findByProperty(key, value),
+                (note) => note.path
+            );
             if (notes.length === 0) {
-                return value === undefined
-                    ? `No notes have a "${key}" property.`
-                    : `No notes have ${key} = ${JSON.stringify(value)}.`;
+                return [
+                    value === undefined
+                        ? `No notes have a "${key}" property.`
+                        : `No notes have ${key} = ${JSON.stringify(value)}.`,
+                    ...staleness(dropped),
+                ].join("\n");
             }
             const lines = notes.map((n) => `${n.path}  (${formatBytes(n.size)}, ${day(n.mtime)})`);
-            return [...lines, "", `${notes.length} note(s).`].join("\n");
+            return [...lines, "", `${notes.length} note(s).`, ...staleness(dropped)].join("\n");
         },
     });
 
@@ -154,10 +181,17 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
         description: "List the notes carrying a given tag. Give the tag without its leading '#'.",
         parameters: z.object({ tag: z.string().min(1) }),
         execute: async ({ tag }) => {
-            const notes = ctx.index.findByTag(tag.replace(/^#/, ""));
-            if (notes.length === 0) return `No notes are tagged #${tag.replace(/^#/, "")}.`;
+            const bare = tag.replace(/^#/, "");
+            const { rows: notes, dropped } = await confirmLive(
+                ctx,
+                ctx.index.findByTag(bare),
+                (note) => note.path
+            );
+            if (notes.length === 0) {
+                return [`No notes are tagged #${bare}.`, ...staleness(dropped)].join("\n");
+            }
             const lines = notes.map((n) => `${n.path}  (${day(n.mtime)})`);
-            return [...lines, "", `${notes.length} note(s).`].join("\n");
+            return [...lines, "", `${notes.length} note(s).`, ...staleness(dropped)].join("\n");
         },
     });
 
@@ -177,6 +211,18 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
         execute: async ({ path, direction }) => {
             const which = direction ?? "both";
             const sections: string[] = [];
+
+            // The note itself first. Its links are its content, so answering
+            // for a note the vault no longer holds would be exactly the leak
+            // this file is careful about, and the index alone cannot say.
+            if (!(await ctx.reader.live([path])).has(path)) {
+                ctx.index.remove(path);
+                return (
+                    `There is no note at "${path}", so it has no links. If it was deleted, that is ` +
+                    `why: its links went with it. Anything that still points at it now shows up as ` +
+                    `an unresolved link in vault_health.`
+                );
+            }
 
             if (which === "outgoing" || which === "both") {
                 const links = ctx.index.outgoingLinks(path);
@@ -199,7 +245,7 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
             }
 
             if (which === "backlinks" || which === "both") {
-                const back = ctx.index.backlinks(path);
+                const { rows: back } = await confirmLive(ctx, ctx.index.backlinks(path), (link) => link.path);
                 sections.push("", `Links to ${path} (${back.length}):`);
                 if (back.length === 0) {
                     sections.push("  none");
@@ -222,8 +268,11 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
             "or moving notes.",
         parameters: z.object({}),
         execute: async () => {
-            const broken = ctx.index.brokenLinks();
-            const errors = ctx.index.frontmatterErrors();
+            // Both lists name the note the problem is in, so both are confirmed
+            // before being reported. A curation report is the wrong place to
+            // send someone after a note that is not there.
+            const { rows: broken } = await confirmLive(ctx, ctx.index.brokenLinks(), (b) => b.source);
+            const { rows: errors } = await confirmLive(ctx, ctx.index.frontmatterErrors(), (e) => e.path);
             const counts = ctx.index.count();
 
             const sections = [

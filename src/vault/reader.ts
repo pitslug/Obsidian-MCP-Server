@@ -102,6 +102,46 @@ export class VaultReader {
         );
     }
 
+    /**
+     * Which of these paths the vault still holds, as one lookup.
+     *
+     * The search index is a cache, and a cache can be wrong in one direction
+     * that matters: it can still hold a note the vault no longer has. The
+     * changes feed removes a deleted note promptly, but "promptly" is not
+     * "always", and the feed can die and log about it while search goes on
+     * answering. So results that came from the index are confirmed here before
+     * anyone sees them.
+     *
+     * Deliberately shallow. It reads the file documents and nothing else, no
+     * chunks and no assembly, because the only question is whether each path
+     * exists and is not a tombstone. One `allDocs` rather than a get per path,
+     * so confirming a page of results costs one local round trip.
+     */
+    async live(paths: readonly string[]): Promise<Set<string>> {
+        const alive = new Set<string>();
+        if (paths.length === 0) return alive;
+
+        const byId = new Map<string, string>();
+        for (const path of paths) byId.set(await this.idFor(path), path);
+
+        const result = (await this.db.allDocs({
+            keys: [...byId.keys()],
+            include_docs: true,
+        })) as unknown as { rows: { id?: string; doc?: unknown }[] };
+
+        for (const row of result.rows) {
+            // A missing or deleted key comes back as a row with no document,
+            // which is the answer rather than an error to handle.
+            const path = row.id ? byId.get(row.id) : undefined;
+            const doc = row.doc as FileEntry | undefined;
+            if (!path || !doc) continue;
+            if (!isFileEntry(doc) || isDeleted(doc)) continue;
+            alive.add(path);
+        }
+
+        return alive;
+    }
+
     async read(path: string, options: ReadOptions = {}): Promise<ReadResult> {
         const id = await this.idFor(path);
         const status = this.options.replicator.status();

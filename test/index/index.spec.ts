@@ -239,6 +239,39 @@ describe("updating", () => {
         expect(index.tagInventory()).toEqual([]);
     });
 
+    it("takes the note's own links with it", () => {
+        // The schema's cascade is what does this, so it is checked rather than
+        // assumed. A note's links are its content, and answering note_links for
+        // a deleted note would be reporting what it used to say.
+        index.put(note("gone.md", "[[somewhere]] and [[else]]"));
+        expect(index.outgoingLinks("gone.md")).toHaveLength(2);
+
+        index.remove("gone.md");
+
+        expect(index.outgoingLinks("gone.md")).toEqual([]);
+        expect(index.brokenLinks().filter((b) => b.source === "gone.md")).toEqual([]);
+    });
+
+    it("keeps a link that pointed at the deleted note, and marks it unresolved", () => {
+        // The half the cascade cannot do. This link belongs to a note that still
+        // exists, so it stays. Left resolved it would go on naming a note the
+        // vault no longer holds, and vault_health would report nothing wrong.
+        // Unresolved, it is reported as broken, which is both true and what
+        // someone who has just deleted a linked-to note needs to see.
+        index.put(note("survivor.md", "see [[doomed]]"));
+        index.put(note("doomed.md", "not for long"));
+        index.resolveLinks();
+        expect(index.backlinks("doomed.md").map((b) => b.path)).toEqual(["survivor.md"]);
+
+        index.remove("doomed.md");
+
+        expect(index.outgoingLinks("survivor.md")[0]?.resolvedPath).toBeUndefined();
+        expect(index.brokenLinks().map((b) => `${b.source} -> ${b.target}`)).toContain(
+            "survivor.md -> doomed"
+        );
+        expect(index.backlinks("doomed.md")).toEqual([]);
+    });
+
     it("indexes a binary file as a row with no derived content", () => {
         index.put(binary("scan.pdf", 5000));
         expect(index.count()).toMatchObject({ notes: 1, binary: 1, text: 0 });
