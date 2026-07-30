@@ -53,11 +53,22 @@ Nothing here holds an OAuth credential.
     `.github/workflows/docker-publish.yml` builds and pushes to GHCR on every
     push to `main`, same as `onenote-mcp`. Nothing is checked out on the server.
 
-    **GHCR packages start private even when the repository is public.** Set
-    `ghcr.io/pitslug/obsidian-mcp-server` to public in the package settings, or
-    the first `docker compose pull` fails with a 401 that reads like a missing
-    image. The alternative is a `docker login ghcr.io` on the server with a
-    read:packages token, which is one more credential to keep.
+    **GHCR packages start private even when the repository is public.** Left
+    private, the first `docker compose pull` fails with a 401 that reads like a
+    missing image rather than a permission problem.
+
+    The package does not exist until the first workflow run succeeds, so this
+    comes after the first push, not before:
+
+        https://github.com/users/pitslug/packages/container/obsidian-mcp-server/settings
+
+    Danger Zone, Change visibility, Public, then type the package name to
+    confirm. One way: a public package cannot be made private again.
+
+    The alternative is to leave it private and run
+    `docker login ghcr.io -u pitslug` on the server with a token carrying
+    `read:packages`. That works and changes nothing in the compose file; it is
+    one more credential to keep track of.
 
     The compose file pulls `:edge`, which is whatever is on `main`. Once the
     work is settled, tag a release and pin to it:
