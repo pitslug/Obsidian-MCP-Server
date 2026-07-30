@@ -36,6 +36,7 @@ function planOf(changes: PlannedChange[]): Plan {
             creates: effective.filter((c) => c.effect === "create").length,
             updates: effective.filter((c) => c.effect === "update").length,
             deletes: effective.filter((c) => c.effect === "delete").length,
+            moves: effective.filter((c) => c.effect === "move").length,
             unchanged: changes.filter((c) => c.unchanged).length,
             bytesBefore: changes.reduce((sum, c) => sum + (c.sizeBefore ?? 0), 0),
             bytesAfter: changes.reduce((sum, c) => sum + (c.sizeAfter ?? 0), 0),
@@ -143,5 +144,43 @@ describe("renderPlan", () => {
 
         expect(out).toContain("Excluded (1):");
         expect(out).toContain("broken.md: it is not valid YAML.");
+    });
+});
+
+describe("a relocation in a plan", () => {
+    it("shows both paths, because the old one is half the change", () => {
+        const out = render([
+            change({
+                path: "Interacts/Superseded/Peter Litzow.pdf",
+                from: "Interacts/Peter Litzow.pdf",
+                effect: "move",
+                notable: true,
+            }),
+        ]);
+
+        expect(out.split("\n")[0]).toBe("This plan will change 1 note(s): 1 to move.");
+        expect(out).toContain("Interacts/Peter Litzow.pdf -> Interacts/Superseded/Peter Litzow.pdf");
+    });
+
+    it("never truncates the move itself out of a long plan", () => {
+        // The link rewrites are routine and repetitive and get sampled. The
+        // relocation is the thing the plan is about, and a plan that showed
+        // twenty edits and not the move would be describing the wrong change.
+        const rewrites = Array.from({ length: 40 }, (_unused, i) =>
+            change({ path: `notes/${i}.md`, summary: "rewrites 1 link" })
+        );
+        const out = render([
+            change({
+                path: "Meetings/Minutes.md",
+                from: "Meetings/Notes.md",
+                effect: "move",
+                notable: true,
+                summary: "renamed, so 40 links are rewritten",
+            }),
+            ...rewrites,
+        ]);
+
+        expect(out).toContain("Meetings/Notes.md -> Meetings/Minutes.md: renamed, so 40 links are rewritten");
+        expect(out).toContain("and 32 more, all of the same shape.");
     });
 });

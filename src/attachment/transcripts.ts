@@ -125,6 +125,9 @@ export class TranscriptStore {
         all: StatementSync;
         history: StatementSync;
         remove: StatementSync;
+        movePath: StatementSync;
+        moveHistoryPath: StatementSync;
+        copyRow: StatementSync;
     };
 
     constructor(private readonly path: string) {}
@@ -181,15 +184,24 @@ export class TranscriptStore {
                 `SELECT * FROM transcript_history WHERE path = ? ORDER BY superseded_at DESC, id DESC`
             ),
             remove: this.db.prepare(`DELETE FROM transcripts WHERE path = ?`),
+            movePath: this.db.prepare(`UPDATE transcripts SET path = ? WHERE path = ?`),
+            moveHistoryPath: this.db.prepare(`UPDATE transcript_history SET path = ? WHERE path = ?`),
+            // created_at is carried across rather than set to now: a copy of a
+            // file is byte-identical, so the reading is the same reading, made
+            // when it was made.
+            copyRow: this.db.prepare(
+                `INSERT INTO transcripts (path, text, source_size, source_mtime, provenance, created_at, updated_at)
+                 SELECT ?, text, source_size, source_mtime, provenance, created_at, ?
+                 FROM transcripts WHERE path = ?`
+            ),
         };
     }
 
     /** The version recorded in an existing file, or undefined if it is new. */
     private storedVersion(): number | undefined {
         try {
-            const row = this.db
-                .prepare(`SELECT value FROM meta WHERE key = 'schema_version'`)
-                .get() as { value?: string } | undefined;
+            const row = this.db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as
+                { value?: string } | undefined;
             return row?.value === undefined ? undefined : Number(row.value);
         } catch {
             // No meta table: a database this code has not written to yet.
@@ -258,6 +270,73 @@ export class TranscriptStore {
      */
     remove(path: string): void {
         this.statements.remove.run(path);
+    }
+
+    /**
+     * Follow a file that moved.
+     *
+     * A transcription is keyed by path, so filing an Interact PDF into
+     * `Superseded/` would otherwise orphan the one thing in this system that
+     * nothing can recompute. The history moves with it, because the history
+     * exists so that a bad rewrite cannot destroy a good reading, and a history
+     * left behind under the old path is a history nobody will find.
+     *
+     * A missing source is not an error. Most files have no transcription, and
+     * every move would otherwise have to ask first.
+     *
+     * Anything already stored at the destination is archived rather than
+     * overwritten. The move tools refuse a destination that exists, so this
+     * should not arise; if it does, the reading that was there is worth more
+     * than the tidiness of refusing, and this step runs after the vault write
+     * where a refusal helps nobody.
+     */
+    rename(from: string, to: string, now = Date.now()): boolean {
+        if (from === to) return false;
+        const source = this.get(from);
+        const history = this.history(from);
+        if (!source && history.length === 0) return false;
+
+        this.db.exec("BEGIN");
+        try {
+            if (this.get(to)) {
+                this.statements.archive.run(now, to);
+                this.statements.remove.run(to);
+            }
+            this.statements.movePath.run(to, from);
+            this.statements.moveHistoryPath.run(to, from);
+            this.db.exec("COMMIT");
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+        return source !== undefined;
+    }
+
+    /**
+     * Give a copy of a file the same transcription.
+     *
+     * The content is byte-identical, so the reading is valid, and the
+     * alternative is paying a model to read a 4 MiB scan a second time. The
+     * history stays with the original: it is the record of how that file's
+     * reading was arrived at, not a property of the bytes.
+     */
+    copy(from: string, to: string, now = Date.now()): boolean {
+        if (from === to) return false;
+        if (!this.get(from)) return false;
+
+        this.db.exec("BEGIN");
+        try {
+            if (this.get(to)) {
+                this.statements.archive.run(now, to);
+                this.statements.remove.run(to);
+            }
+            this.statements.copyRow.run(to, now, from);
+            this.db.exec("COMMIT");
+        } catch (error) {
+            this.db.exec("ROLLBACK");
+            throw error;
+        }
+        return true;
     }
 
     /** Transcriptions whose path is no longer in the vault, usually renames. */

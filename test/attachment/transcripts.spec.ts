@@ -277,3 +277,62 @@ describe("durability", () => {
         }
     });
 });
+
+describe("following a file that moved", () => {
+    it("carries the transcription to the new path", () => {
+        store.put(ENTRY);
+        expect(store.rename(ENTRY.path, "Ink/Superseded/2026-07-20 meeting.pdf")).toBe(true);
+
+        expect(store.get(ENTRY.path)).toBeUndefined();
+        expect(store.get("Ink/Superseded/2026-07-20 meeting.pdf")?.text).toBe(ENTRY.text);
+    });
+
+    it("carries the history with it", () => {
+        // The history is why a bad rewrite is an inconvenience rather than a
+        // loss. Left behind under the old path it is neither: it is simply
+        // gone, from the point of view of anyone looking.
+        store.put(ENTRY, 1_000);
+        store.put({ ...ENTRY, text: "A shorter, worse reading." }, 2_000);
+        store.rename(ENTRY.path, "Archive/meeting.pdf");
+
+        expect(store.history(ENTRY.path)).toEqual([]);
+        expect(store.history("Archive/meeting.pdf").map((row) => row.text)).toEqual([ENTRY.text]);
+    });
+
+    it("treats a missing source as nothing to do", () => {
+        // Most files have no transcription, so a move that asked first would be
+        // asking on every move.
+        expect(store.rename("Ink/never transcribed.pdf", "Archive/never transcribed.pdf")).toBe(false);
+        expect(store.all()).toEqual([]);
+    });
+
+    it("archives anything already at the destination rather than dropping it", () => {
+        store.put(ENTRY, 1_000);
+        store.put({ ...ENTRY, path: "Archive/meeting.pdf", text: "An older reading." }, 1_500);
+        store.rename(ENTRY.path, "Archive/meeting.pdf", 3_000);
+
+        expect(store.get("Archive/meeting.pdf")?.text).toBe(ENTRY.text);
+        expect(store.history("Archive/meeting.pdf").map((row) => row.text)).toEqual(["An older reading."]);
+    });
+
+    it("gives a copy the same reading, and keeps the original's", () => {
+        store.put(ENTRY, 1_000);
+        expect(store.copy(ENTRY.path, "Ink/Copies/meeting.pdf", 2_000)).toBe(true);
+
+        expect(store.get(ENTRY.path)?.text).toBe(ENTRY.text);
+        const copied = store.get("Ink/Copies/meeting.pdf");
+        expect(copied?.text).toBe(ENTRY.text);
+        // The reading was made when it was made. Only the row is new.
+        expect(copied?.createdAt).toBe(1_000);
+        expect(copied?.updatedAt).toBe(2_000);
+    });
+
+    it("does not copy a history, which belongs to the file it was made for", () => {
+        store.put(ENTRY, 1_000);
+        store.put({ ...ENTRY, text: "corrected" }, 2_000);
+        store.copy(ENTRY.path, "Ink/Copies/meeting.pdf", 3_000);
+
+        expect(store.history("Ink/Copies/meeting.pdf")).toEqual([]);
+        expect(store.history(ENTRY.path).length).toBe(1);
+    });
+});

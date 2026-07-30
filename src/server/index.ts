@@ -33,6 +33,7 @@ import { TranscriptStore } from "../attachment/transcripts.js";
 import { loadConfig, redactedUrl, remoteUrl, type Config } from "../config.js";
 import { documentUrl, endpointFor, headersFor } from "../couch/rest.js";
 import { createLogger, type Logger } from "./logger.js";
+import { CONVENTIONS_NOTE, serverInstructions, trimConventions, type Conventions } from "./instructions.js";
 import { createAuthWiring } from "../auth/index.js";
 
 /**
@@ -123,6 +124,35 @@ async function resolveVaultSettings(
     return { settings, salt };
 }
 
+/**
+ * The vault's own conventions note, if it has one.
+ *
+ * Absent is the ordinary case and not a warning: most vaults do not have one,
+ * and a log line about it on every start would be noise. Anything other than
+ * absent is worth saying, because a note that exists and could not be read
+ * looks from the outside exactly like a client ignoring it.
+ */
+async function loadConventions(reader: VaultReader, log: Logger): Promise<Conventions | undefined> {
+    try {
+        const { file } = await reader.read(CONVENTIONS_NOTE);
+        if (file.kind !== "text") return undefined;
+        const conventions = trimConventions(CONVENTIONS_NOTE, file.text);
+        log.info(
+            `Passing "${CONVENTIONS_NOTE}" to clients as this vault's conventions ` +
+                `(${conventions.text.length.toLocaleString()} characters` +
+                `${conventions.truncated ? ", truncated" : ""}).`
+        );
+        return conventions;
+    } catch (error) {
+        if ((error as Error).name === "NoteNotFoundError") return undefined;
+        log.warn(
+            `Could not read "${CONVENTIONS_NOTE}", so clients will not be told this vault's ` +
+                `conventions: ${(error as Error).message}`
+        );
+        return undefined;
+    }
+}
+
 export interface RunningServer {
     stop(): Promise<void>;
 }
@@ -169,20 +199,25 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         transcripts,
     });
     await builder.rebuild();
-    builder.follow();
+    await builder.follow();
 
     const auth = createAuthWiring(config.auth, {
         onReject: (reason) => log.warn(`Rejected a request: ${reason}`),
     });
 
+    // Read once, at startup, because instructions are sent when a client
+    // connects and there is no way to revise them mid-session. vault_status
+    // says whether the note has changed since, which is the only thing that
+    // turns "the conventions were not followed" into a question with an answer.
+    const conventions = await loadConventions(reader, log);
+
     const server = new FastMCP({
         name: "obsidian-vault",
         version: "0.1.0",
-        instructions:
-            "Read access to an Obsidian vault synced by Self-hosted LiveSync. Notes are addressed " +
-            "by vault-relative path. Reads come from a local replica that trails the server " +
-            "slightly; every response says how stale it may be, and read_note accepts fresh=true " +
-            "when that matters. This server is currently read-only.",
+        // Computed, never a literal. The sentence that lived here said the
+        // server was read-only, and went on saying it for a day after writing
+        // was turned on, in the one string every client reads first.
+        instructions: serverInstructions({ readOnly: config.readOnly, conventions }),
 
         // `authenticate` is only consulted for the HTTP transport; on stdio the
         // transport itself is the boundary, and `createAuthWiring` returns
@@ -219,6 +254,8 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         attachmentSizeCap: config.attachmentSizeCap,
         transcripts,
         writableTools: () => writableTools,
+        conventions,
+        indexFeedAttached: () => builder.feedAttached,
     };
     registerTools(server, toolContext);
     registerAttachmentTool(server, toolContext);
@@ -241,6 +278,17 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         transform,
         readOnly: config.readOnly,
         planCeiling: config.planCeiling,
+        // Everything outside the vault that is keyed on a path, told in one
+        // place. The executor is the only thing that knows a file moved, and it
+        // is the one route both the single-file tools and a committed plan take.
+        onRelocated: async (from, to, { keepSource }) => {
+            const transcriptMoved = keepSource ? transcripts.copy(from, to) : transcripts.rename(from, to);
+            // After the transcription, not before: the feed has almost
+            // certainly indexed the destination already, and it did so while
+            // the transcription was still filed under the old path.
+            await builder.reindex(to);
+            return { transcriptMoved };
+        },
         onWarning: (message) => log.warn(message),
     });
 

@@ -31,7 +31,14 @@ import {
     type VaultFormatSettings,
 } from "../../src/vault-model/index.js";
 import { CouchWriter, ReadOnlyError, RevisionConflictError } from "../../src/write/couch.js";
-import { UnwritablePathError, WriteExecutor, WriteTargetMissingError } from "../../src/write/executor.js";
+import {
+    DestinationExistsError,
+    RelocationIncompleteError,
+    UnwritablePathError,
+    WriteExecutor,
+    WriteTargetMissingError,
+    type RelocationListener,
+} from "../../src/write/executor.js";
 import { UnsyncablePathError } from "../../src/vault-model/ids.js";
 import { startFakeCouch, type FakeCouch } from "../helpers/couch-server.js";
 import type { CouchConfig } from "../../src/config.js";
@@ -77,7 +84,13 @@ function configFor(db: string): CouchConfig {
 /** The whole stack: a replicated database and an executor pointed at it. */
 async function stackFor(
     db: string,
-    options: { readOnly?: boolean; settings?: VaultFormatSettings; salt?: Uint8Array<ArrayBuffer> } = {}
+    options: {
+        readOnly?: boolean;
+        settings?: VaultFormatSettings;
+        salt?: Uint8Array<ArrayBuffer>;
+        onRelocated?: RelocationListener;
+        onWarning?: (message: string) => void;
+    } = {}
 ): Promise<{ executor: WriteExecutor; reader: VaultReader; writer: CouchWriter }> {
     const settings = options.settings ?? SETTINGS;
     const transform = transformContextFor(settings, options.salt);
@@ -98,6 +111,8 @@ async function stackFor(
         settings,
         transform,
         readOnly: options.readOnly ?? false,
+        ...(options.onRelocated ? { onRelocated: options.onRelocated } : {}),
+        ...(options.onWarning ? { onWarning: options.onWarning } : {}),
     });
     const reader = new VaultReader({ replicator, settings });
     return { executor, reader, writer };
@@ -547,5 +562,255 @@ describe("encrypted vaults", () => {
 
         await expect(drop(executor, "old.md")).rejects.toThrow(/pre-chunking/);
         expect((await couch.get(db, "old.md"))?.data).toBe("content from before chunking existed");
+    }, 60_000);
+});
+
+describe("relocating a file", () => {
+    /** Read a file, the way a tool layer has to before it can move one. */
+    async function readForMove(executor: WriteExecutor, reader: VaultReader, path: string) {
+        const entry = await executor.currentEntry(path);
+        const { file } = await reader.read(path);
+        return {
+            content: (file.kind === "text"
+                ? { kind: "text", text: file.text }
+                : { kind: "binary", bytes: file.bytes }) as FileContent,
+            expectedRev: entry?._rev as string,
+        };
+    }
+
+    it("writes the destination and removes the source, byte-identical", async () => {
+        const db = nextDb("move");
+        const { executor, reader } = await stackFor(db);
+        const text = "# Interact\n\nSpoke to Peter about the Adelaide lease.\n";
+        await put(executor, "Interacts/Peter.md", { kind: "text", text });
+
+        const receipt = await executor.relocate({
+            from: "Interacts/Peter.md",
+            to: "Interacts/Superseded/Peter.md",
+            ...(await readForMove(executor, reader, "Interacts/Peter.md")),
+        });
+
+        expect(receipt.written.created).toBe(true);
+        expect(receipt.removed?.deleted).toBe(true);
+
+        const moved = await readFromCouch(db, receipt.written.id);
+        expect(moved.text).toBe(text);
+        // Gone from the old path, as a tombstone rather than an erasure: that
+        // is what tells the other devices to remove their copies.
+        await expect(reader.read("Interacts/Peter.md")).rejects.toThrow(/No note at/);
+    }, 60_000);
+
+    it("sends no chunks, because the source is still there to hold them", async () => {
+        const db = nextDb("move-reuse");
+        const { executor, reader } = await stackFor(db);
+        const text = Array.from({ length: 200 }, (_unused, i) => `line ${i} alpha bravo charlie\n`).join("");
+        await put(executor, "big.md", { kind: "text", text });
+
+        const receipt = await executor.relocate({
+            from: "big.md",
+            to: "archive/big.md",
+            ...(await readForMove(executor, reader, "big.md")),
+        });
+
+        // The whole point of the ordering: at the moment the destination is
+        // written the source still references every chunk, so CouchDB is
+        // guaranteed to hold them and none are re-sent.
+        expect(receipt.written.chunksWritten).toBe(0);
+        expect(receipt.written.chunksReused).toBeGreaterThan(1);
+        expect((await readFromCouch(db, receipt.written.id)).text).toBe(text);
+    }, 60_000);
+
+    it("carries the creation time across", async () => {
+        const db = nextDb("move-ctime");
+        const { executor, reader } = await stackFor(db);
+        await put(executor, "old.md", { kind: "text", text: "written long ago" }, 1_600_000_000_000);
+        const before = await executor.currentEntry("old.md");
+
+        const receipt = await executor.relocate({
+            from: "old.md",
+            to: "archive/old.md",
+            ...(await readForMove(executor, reader, "old.md")),
+        });
+
+        // Without this every moved note sorts as newly created, which is
+        // invisible until somebody sorts by it.
+        const moved = await readFromCouch(db, receipt.written.id);
+        expect(moved.entry.ctime).toBe((before as { ctime: number }).ctime);
+    }, 60_000);
+
+    it("refuses when something is already at the destination", async () => {
+        const db = nextDb("move-occupied");
+        const { executor, reader } = await stackFor(db);
+        await put(executor, "a.md", { kind: "text", text: "the one being moved" });
+        await put(executor, "b.md", { kind: "text", text: "the one already there" });
+
+        await expect(
+            executor.relocate({ from: "a.md", to: "b.md", ...(await readForMove(executor, reader, "a.md")) })
+        ).rejects.toThrow(DestinationExistsError);
+
+        // Both untouched, which is the part worth asserting: a refusal that
+        // had already written the destination would be worse than no refusal.
+        expect((await reader.read("a.md")).file.text).toBe("the one being moved");
+        expect((await reader.read("b.md")).file.text).toBe("the one already there");
+    }, 60_000);
+
+    it("writes over a tombstone at the destination", async () => {
+        const db = nextDb("move-tombstone");
+        const { executor, reader } = await stackFor(db);
+        await put(executor, "gone.md", { kind: "text", text: "deleted earlier" });
+        await drop(executor, "gone.md");
+        await put(executor, "here.md", { kind: "text", text: "the survivor" });
+
+        const receipt = await executor.relocate({
+            from: "here.md",
+            to: "gone.md",
+            ...(await readForMove(executor, reader, "here.md")),
+        });
+
+        expect((await readFromCouch(db, receipt.written.id)).text).toBe("the survivor");
+    }, 60_000);
+
+    it("refuses a source that is not there", async () => {
+        const db = nextDb("move-missing");
+        const { executor } = await stackFor(db);
+
+        await expect(
+            executor.relocate({
+                from: "nothing.md",
+                to: "somewhere.md",
+                content: { kind: "text", text: "" },
+                expectedRev: "1-nope",
+            })
+        ).rejects.toThrow(WriteTargetMissingError);
+    }, 60_000);
+
+    it("refuses a revision that has moved on", async () => {
+        const db = nextDb("move-stale");
+        const { executor, reader } = await stackFor(db);
+        await put(executor, "busy.md", { kind: "text", text: "first" });
+        const read = await readForMove(executor, reader, "busy.md");
+        await put(executor, "busy.md", { kind: "text", text: "second, from another device" });
+
+        await expect(executor.relocate({ from: "busy.md", to: "moved.md", ...read })).rejects.toThrow(
+            RevisionConflictError
+        );
+    }, 60_000);
+
+    it("leaves a duplicate rather than a hole when the source cannot be removed", async () => {
+        // The state the execution order exists to guarantee, constructed
+        // deliberately: it is the only way to know the order was implemented
+        // as designed rather than merely written down that way.
+        const db = nextDb("move-halfway");
+        const { executor, reader, writer } = await stackFor(db);
+        await put(executor, "fragile.md", { kind: "text", text: "worth not losing" });
+        const read = await readForMove(executor, reader, "fragile.md");
+
+        const realPut = writer.put.bind(writer);
+        writer.put = async (doc: Record<string, unknown>) => {
+            if (doc.deleted === true) throw new Error("the network went away");
+            return realPut(doc);
+        };
+
+        await expect(
+            executor.relocate({ from: "fragile.md", to: "archive/fragile.md", ...read })
+        ).rejects.toThrow(RelocationIncompleteError);
+
+        writer.put = realPut;
+        expect((await readFromCouch(db, await executor.idFor("archive/fragile.md"))).text).toBe(
+            "worth not losing"
+        );
+        expect((await readFromCouch(db, await executor.idFor("fragile.md"))).text).toBe("worth not losing");
+    }, 60_000);
+
+    it("copies without removing the source", async () => {
+        const db = nextDb("copy");
+        const { executor, reader } = await stackFor(db);
+        await put(executor, "template.md", { kind: "text", text: "# Agenda\n\n- \n" });
+
+        const receipt = await executor.relocate({
+            from: "template.md",
+            to: "Meetings/2026-07-30.md",
+            keepSource: true,
+            ...(await readForMove(executor, reader, "template.md")),
+        });
+
+        expect(receipt.removed).toBeUndefined();
+        expect((await reader.read("template.md")).file.text).toBe("# Agenda\n\n- \n");
+        expect((await readFromCouch(db, receipt.written.id)).text).toBe("# Agenda\n\n- \n");
+    }, 60_000);
+
+    it("takes the transcription with it, and says so", async () => {
+        const db = nextDb("move-transcript");
+        const moved: string[] = [];
+        const { executor, reader } = await stackFor(db, {
+            onRelocated: (from, to, { keepSource }) => {
+                moved.push(`${keepSource ? "copy" : "rename"} ${from} -> ${to}`);
+                return { transcriptMoved: true };
+            },
+        });
+        await put(executor, "Ink/page.md", { kind: "text", text: "stands in for a scan" });
+
+        const receipt = await executor.relocate({
+            from: "Ink/page.md",
+            to: "Ink/Filed/page.md",
+            ...(await readForMove(executor, reader, "Ink/page.md")),
+        });
+
+        expect(receipt.transcriptMoved).toBe(true);
+        expect(moved).toEqual(["rename Ink/page.md -> Ink/Filed/page.md"]);
+    }, 60_000);
+
+    it("keeps the move when the transcription cannot follow", async () => {
+        // A transcription left under the old path is recoverable: the reading
+        // still exists and list_untranscribed reports it as an orphan. Failing
+        // the move over it would be undoing a write that already succeeded.
+        const db = nextDb("move-transcript-fails");
+        const warnings: string[] = [];
+        const { executor, reader } = await stackFor(db, {
+            onWarning: (message) => warnings.push(message),
+            onRelocated: () => {
+                throw new Error("the transcript store is locked");
+            },
+        });
+        await put(executor, "Ink/page.md", { kind: "text", text: "stands in for a scan" });
+
+        const receipt = await executor.relocate({
+            from: "Ink/page.md",
+            to: "Ink/Filed/page.md",
+            ...(await readForMove(executor, reader, "Ink/page.md")),
+        });
+
+        expect(receipt.transcriptMoved).toBe(false);
+        expect(receipt.transcriptError).toContain("still filed under");
+        expect(warnings.join("\n")).toContain("the transcript store is locked");
+        expect((await reader.read("Ink/Filed/page.md")).file.text).toBe("stands in for a scan");
+    }, 60_000);
+
+    it("refuses to move anything into the plugin's own containers", async () => {
+        const db = nextDb("move-internal");
+        const { executor, reader } = await stackFor(db);
+        await put(executor, "note.md", { kind: "text", text: "ordinary" });
+
+        await expect(
+            executor.relocate({
+                from: "note.md",
+                to: "ix:themes/note.md",
+                ...(await readForMove(executor, reader, "note.md")),
+            })
+        ).rejects.toThrow(UnwritablePathError);
+    }, 60_000);
+
+    it("refuses to write when the server is read-only", async () => {
+        const db = nextDb("move-readonly");
+        const { executor } = await stackFor(db, { readOnly: true });
+
+        await expect(
+            executor.relocate({
+                from: "a.md",
+                to: "b.md",
+                content: { kind: "text", text: "" },
+                expectedRev: "1-a",
+            })
+        ).rejects.toThrow(ReadOnlyError);
     }, 60_000);
 });

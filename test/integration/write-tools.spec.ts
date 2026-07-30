@@ -56,8 +56,14 @@ const MUTATING_TOOLS = [
     "edit_note",
     "set_properties",
     "delete_note",
+    "move_file",
+    "copy_file",
+    "restore_note",
     "commit_plan",
 ];
+
+/** Read the server's own instructions, which is what a client is told first. */
+const instructions = () => client.getInstructions() ?? "";
 
 function textOf(result: unknown): string {
     return ((result as { content?: { type: string; text?: string }[] }).content ?? [])
@@ -167,6 +173,23 @@ beforeAll(async () => {
         ["projects/fence.md", "---\ntags: [project]\n---\n\nThe fence.\n"],
         ["projects/broken.md", "---\nstatus: [unclosed\n---\n\nBad YAML on purpose.\n"],
         ["notes/repeated.md", "alpha\nbeta\nalpha\n"],
+        // The vault's own conventions, which the server passes to clients.
+        ["CLAUDE.md", "# How this vault works\n\nTags are singular and lower case.\n"],
+        // A tag in both of the places a tag can live, plus one nested under it,
+        // one that merely starts the same way, and one inside a code fence.
+        ["tags/one.md", "---\ntags: [work, idea]\n---\n\nSpoke to them about #work today.\n"],
+        ["tags/two.md", "---\ntags:\n  - work/acme\n---\n\n#work/acme and #workshop\n"],
+        ["tags/three.md", "No frontmatter here, just #work and #work/acme.\n"],
+        ["tags/fenced.md", "```\n#work\n```\n\nNothing real here.\n"],
+        // A small link graph, because a move is a question about links before
+        // it is a question about files. The duplicate basename is the shape
+        // the real vault has, and the one that makes a move dangerous.
+        ["links/hub.md", "See [[filed]] and ![[filed#Detail]] and [[filed|the note]].\n"],
+        ["links/filed.md", "# Filed\n\n## Detail\n\nSomething.\n"],
+        ["links/lonely.md", "Nothing points at this one.\n"],
+        ["dupes/report.md", "The one at the top.\n"],
+        ["dupes/old/report.md", "The superseded one.\n"],
+        ["dupes/pointer.md", "See [[report]].\n"],
     ]) {
         const composed = await composeWrite(
             path as string,
@@ -699,4 +722,277 @@ describe("a deleted note stops being findable", () => {
         await until(async () => !(await call("tag_inventory", {})).includes("private"));
         expect(await call("tag_inventory", {})).not.toContain("private");
     });
+});
+
+describe("moving and copying a file", () => {
+    it("moves a file whose links do not care which folder it is in", async () => {
+        const out = await call("move_file", { path: "links/filed.md", to: "links/archive/filed.md" });
+
+        expect(out).toContain('Moved "links/filed.md" to "links/archive/filed.md"');
+        // The claim the caller is relying on, said out loud rather than implied.
+        expect(out).toContain("No link in the vault would break");
+
+        expect(await inVault("links/archive/filed.md")).toContain("## Detail");
+        expect(await inVault("links/filed.md")).toBeUndefined();
+
+        // The links were basenames, so they still resolve, and the hub note was
+        // never touched.
+        expect(await inVault("links/hub.md")).toBe(
+            "See [[filed]] and ![[filed#Detail]] and [[filed|the note]].\n"
+        );
+        await until(async () => {
+            const links = await call("note_links", { path: "links/hub.md" });
+            return links.includes("links/archive/filed.md");
+        });
+    }, 60_000);
+
+    it("renames a file nothing links to, without ceremony", async () => {
+        const out = await call("move_file", { path: "links/lonely.md", to: "links/renamed.md" });
+
+        expect(out).toContain('Renamed "links/lonely.md" to "links/renamed.md"');
+        expect(await inVault("links/renamed.md")).toBe("Nothing points at this one.\n");
+    }, 60_000);
+
+    it("refuses a rename that would break links, and names the notes", async () => {
+        const out = await call("move_file", {
+            path: "links/archive/filed.md",
+            to: "links/archive/minutes.md",
+        });
+
+        expect(out).toContain("Nothing was written");
+        expect(out).toContain("links/hub.md");
+        expect(out).toContain("plan_move");
+        // Refused means refused: nothing at the new path, and the old one intact.
+        expect(await inVault("links/archive/minutes.md")).toBeUndefined();
+        expect(await inVault("links/archive/filed.md")).toContain("## Detail");
+    }, 60_000);
+
+    it("refuses when something is already at the destination", async () => {
+        const out = await call("move_file", { path: "dupes/report.md", to: "dupes/old/report.md" });
+
+        expect(out).toContain("already exists");
+        expect(await inVault("dupes/report.md")).toBe("The one at the top.\n");
+        expect(await inVault("dupes/old/report.md")).toBe("The superseded one.\n");
+    }, 60_000);
+
+    it("refuses a move that would quietly re-point a link at a different file", async () => {
+        // Nothing breaks and no note changes: `[[report]]` simply comes to mean
+        // the superseded copy. This is the failure the check exists for, and
+        // the only one that leaves the vault reading correctly and meaning
+        // something else.
+        const out = await call("move_file", { path: "dupes/report.md", to: "dupes/old/2026/report.md" });
+
+        expect(out).toContain("quietly name a different file");
+        expect(out).toContain("dupes/pointer.md");
+        expect(await inVault("dupes/old/2026/report.md")).toBeUndefined();
+    }, 60_000);
+
+    it("refuses a copy that would take a link from the file it was copied from", async () => {
+        const out = await call("copy_file", { path: "dupes/old/report.md", to: "report.md" });
+
+        expect(out).toContain("away from the file they point at now");
+        expect(await inVault("report.md")).toBeUndefined();
+    }, 60_000);
+
+    it("copies a file, leaving the original alone", async () => {
+        const out = await call("copy_file", { path: "dupes/old/report.md", to: "dupes/old/report-copy.md" });
+
+        expect(out).toContain('Copied "dupes/old/report.md" to "dupes/old/report-copy.md"');
+        expect(await inVault("dupes/old/report.md")).toBe("The superseded one.\n");
+        expect(await inVault("dupes/old/report-copy.md")).toBe("The superseded one.\n");
+    }, 60_000);
+
+    it("refuses to move an attachment onto a path outside the vault's reach", async () => {
+        const out = await call("move_file", { path: "attachments/scan.png", to: "ix:themes/scan.png" });
+        expect(out).toContain("internal containers");
+    }, 60_000);
+
+    it("takes an attachment's transcription with it, and it stays searchable", async () => {
+        // A transcription is the only thing here that cannot be recomputed, and
+        // filing an attachment into a folder is the most likely move in this
+        // vault. Losing it would be silent: search would simply stop finding a
+        // page that a model was once paid to read.
+        await call("save_transcription", {
+            path: "attachments/scan.png",
+            text: "Handwritten: the Adelaide lease decision was deferred.",
+            provenance: "test",
+        });
+        await until(async () => (await call("search_notes", { query: "Adelaide" })).includes("scan.png"));
+
+        const out = await call("move_file", {
+            path: "attachments/scan.png",
+            to: "attachments/filed/scan.png",
+        });
+        expect(out).toContain("transcription");
+
+        await until(async () =>
+            (await call("search_notes", { query: "Adelaide" })).includes("attachments/filed/scan.png")
+        );
+        const untranscribed = await call("list_untranscribed", {});
+        expect(untranscribed).not.toContain("attachments/scan.png");
+    }, 60_000);
+});
+
+describe("planning a rename", () => {
+    it("rewrites the links, keeping aliases, subpaths and embeds", async () => {
+        const plan = await call("plan_move", {
+            path: "links/archive/filed.md",
+            to: "links/archive/minutes.md",
+        });
+
+        expect(plan).toContain("links/archive/filed.md -> links/archive/minutes.md");
+        expect(plan).toContain("links/hub.md: rewrites 3 link(s)");
+        // Nothing yet, which is the point of a plan.
+        expect(await inVault("links/archive/minutes.md")).toBeUndefined();
+
+        const id = /Plan ([0-9a-f-]{36})/.exec(plan)?.[1];
+        expect(id).toBeTruthy();
+        const committed = await call("commit_plan", { plan_id: id as string });
+        // Two written and one removed, rather than three written: the old path
+        // is a tombstone, not a note anybody wrote.
+        expect(committed).toContain("2 note(s) written, 1 removed");
+        expect(committed).toContain("links/archive/filed.md (removed)");
+
+        expect(await inVault("links/archive/minutes.md")).toContain("## Detail");
+        expect(await inVault("links/archive/filed.md")).toBeUndefined();
+        // Only the targets changed. The alias, the subpath and the embed marker
+        // are somebody's writing and are still exactly as they were.
+        expect(await inVault("links/hub.md")).toBe(
+            "See [[minutes]] and ![[minutes#Detail]] and [[minutes|the note]].\n"
+        );
+    }, 60_000);
+
+    it("refuses to plan a move of something that is not there", async () => {
+        const out = await call("plan_move", { path: "links/ghost.md", to: "links/elsewhere.md" });
+        expect(out).toContain("There is nothing at");
+    }, 60_000);
+});
+
+describe("what the server tells a client about itself", () => {
+    it("does not claim to be read-only when it is not", async () => {
+        // The bug this replaced: a hardcoded sentence saying the server was
+        // read-only, sent to every client while every write tool sat
+        // registered behind it. Nothing failed, because nothing checked.
+        expect(instructions()).not.toContain("read-only");
+        expect(instructions()).toContain("Writing is enabled");
+    });
+
+    it("says a plan is to be shown to somebody before it is committed", async () => {
+        expect(instructions()).toContain("commit_plan");
+        expect(instructions().toLowerCase()).toContain("shown to the person");
+    });
+
+    it("passes on the vault's own conventions note", async () => {
+        expect(instructions()).toContain("CLAUDE.md");
+        expect(instructions()).toContain("Tags are singular and lower case.");
+    });
+
+    it("says in vault_status that this client was told them", async () => {
+        // Three states look identical from the outside: no conventions note, a
+        // note that was passed on, and a note edited since this client
+        // connected. Only the last is a problem, and only this line tells them
+        // apart.
+        expect(await call("vault_status", {})).toContain(
+            'Conventions: "CLAUDE.md", passed to this client when it connected'
+        );
+    });
+
+    it("notices when the conventions note has changed since the client connected", async () => {
+        await call("append_note", { path: "CLAUDE.md", content: "Meetings go under Meetings/." });
+
+        await until(async () => (await call("vault_status", {})).includes("CHANGED since"));
+        const status = await call("vault_status", {});
+        expect(status).toContain("reconnect");
+    }, 30_000);
+});
+
+describe("renaming a tag across the vault", () => {
+    it("plans both places a tag lives, and writes nothing yet", async () => {
+        const plan = await call("plan_retag", { tag: "work", to: "client" });
+
+        expect(plan).toContain("Renaming #work to #client");
+        expect(plan).toContain("taking 1 nested tag(s) with it");
+        expect(plan).toContain("tags/one.md: renames #work to #client: 1 in the body, 1 frontmatter");
+        expect(plan).toContain("tags/three.md: renames #work to #client: 2 in the body");
+        // Nothing has moved.
+        expect(await inVault("tags/one.md")).toContain("#work");
+
+        const id = /Plan ([0-9a-f-]{36})/.exec(plan)?.[1];
+        await call("commit_plan", { plan_id: id as string });
+
+        expect(await inVault("tags/one.md")).toBe(
+            "---\ntags:\n  - client\n  - idea\n---\n\nSpoke to them about #client today.\n"
+        );
+        expect(await inVault("tags/three.md")).toBe("No frontmatter here, just #client and #client/acme.\n");
+    }, 60_000);
+
+    it("takes the nested tags with it and leaves the lookalike alone", async () => {
+        expect(await inVault("tags/two.md")).toBe(
+            "---\ntags:\n  - client/acme\n---\n\n#client/acme and #workshop\n"
+        );
+    }, 60_000);
+
+    it("never touched the one inside a code fence", async () => {
+        // The index never read it as a tag either, so editing it would be
+        // rewriting an example to suit a rename.
+        expect(await inVault("tags/fenced.md")).toBe("```\n#work\n```\n\nNothing real here.\n");
+    }, 60_000);
+
+    it("refuses to remove a tag that has nested tags under it", async () => {
+        const out = await call("plan_retag", { tag: "client" });
+
+        expect(out).toContain("nested under it");
+        expect(out).toContain("#client/acme");
+        expect(out).toContain("guessing is worse than asking");
+    }, 60_000);
+
+    it("removes a tag that has nothing under it", async () => {
+        const plan = await call("plan_retag", { tag: "idea" });
+        expect(plan).toContain("Removing #idea");
+
+        const id = /Plan ([0-9a-f-]{36})/.exec(plan)?.[1];
+        await call("commit_plan", { plan_id: id as string });
+
+        expect(await inVault("tags/one.md")).toBe(
+            "---\ntags:\n  - client\n---\n\nSpoke to them about #client today.\n"
+        );
+    }, 60_000);
+
+    it("says so rather than planning nothing when the tag does not exist", async () => {
+        const out = await call("plan_retag", { tag: "nonexistent", to: "other" });
+        expect(out).toContain("No note carries #nonexistent");
+        expect(out).toContain("tag_inventory");
+    }, 60_000);
+});
+
+describe("bringing a deleted note back", () => {
+    it("restores it byte for byte from the deletion record", async () => {
+        const before = await inVault("notes/repeated.md");
+        await call("delete_note", { path: "notes/repeated.md" });
+        expect(await inVault("notes/repeated.md")).toBeUndefined();
+
+        const out = await call("restore_note", { path: "notes/repeated.md" });
+
+        expect(out).toContain('Restored "notes/repeated.md"');
+        expect(out).toContain("byte-for-byte");
+        expect(await inVault("notes/repeated.md")).toBe(before);
+    }, 60_000);
+
+    it("refuses when something is there, rather than replacing it", async () => {
+        const out = await call("restore_note", { path: "notes/repeated.md" });
+        expect(out).toContain("is not deleted");
+    }, 60_000);
+
+    it("says so when the path never held anything", async () => {
+        const out = await call("restore_note", { path: "notes/never-existed.md" });
+        expect(out).toContain("There is nothing at");
+    }, 60_000);
+
+    it("makes the restored note findable again", async () => {
+        await call("delete_note", { path: "notes/repeated.md" });
+        await until(async () => !(await call("search_notes", { query: "beta" })).includes("repeated.md"));
+
+        await call("restore_note", { path: "notes/repeated.md" });
+        await until(async () => (await call("search_notes", { query: "beta" })).includes("repeated.md"));
+    }, 60_000);
 });

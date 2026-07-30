@@ -45,6 +45,9 @@ import type { VaultIndex, IndexedNote } from "../index/index.js";
 import type { VaultReader } from "../vault/reader.js";
 import { NoteNotFoundError } from "../vault/reader.js";
 import { editFrontmatter, FrontmatterUnreadableError } from "../note/frontmatter.js";
+import { rewriteLinkTargets } from "../note/links.js";
+import { parseNote } from "../note/parse.js";
+import { isUnder, retagProperty, rewriteInlineTag } from "../note/tags.js";
 import { renderPlan } from "../write/render.js";
 import {
     PlanAlreadyUsedError,
@@ -56,8 +59,8 @@ import {
     type PlanningWriteExecutor,
     type PlanOperation,
 } from "../write/index.js";
-import { UnsyncablePathError } from "../vault-model/index.js";
-import { UnwritablePathError } from "../write/executor.js";
+import { isDeleted, UnsyncablePathError } from "../vault-model/index.js";
+import { DestinationExistsError, UnwritablePathError, WriteTargetMissingError } from "../write/executor.js";
 import { MissingScopeError, requireScope, SCOPE_WRITE, type SessionAuth } from "../auth/index.js";
 
 export interface PlanToolContext {
@@ -186,7 +189,9 @@ async function reporting(work: () => Promise<string>): Promise<string> {
             error instanceof PlanStaleError ||
             error instanceof PlanCommitError ||
             error instanceof UnwritablePathError ||
-            error instanceof UnsyncablePathError
+            error instanceof UnsyncablePathError ||
+            error instanceof DestinationExistsError ||
+            error instanceof WriteTargetMissingError
         ) {
             return error.message;
         }
@@ -308,6 +313,282 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string
             }),
     });
 
+    addTool({
+        name: "plan_retag",
+        description:
+            "Work out what renaming, merging or removing a tag across the whole vault would do, " +
+            "and write nothing. Covers both places a tag lives: the frontmatter list and #tags " +
+            "written in the body. Renaming takes nested tags with it, so renaming 'work' also " +
+            "moves 'work/acme'. Renaming onto a tag that already exists merges them. Omit 'to' to " +
+            "remove the tag instead. Show the plan to the person who asked before calling " +
+            "commit_plan with its ID. Use tag_inventory first to see what the vault actually uses.",
+        parameters: z.object({
+            tag: z
+                .string()
+                .min(1)
+                .describe("The tag as it exists now, without the '#'. Nested tags use '/'."),
+            to: z
+                .string()
+                .optional()
+                .describe(
+                    "What it should become, without the '#'. Leave this out to remove the tag " +
+                        "from every note instead."
+                ),
+            folder: z
+                .string()
+                .optional()
+                .describe(
+                    "Limit to notes under this folder. Leave it out for the whole vault, which " +
+                        "is what renaming a tag usually means."
+                ),
+        }),
+        execute: async ({ tag, to, folder }, { session }) =>
+            reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
+
+                const from = tag.replace(/^#/, "").trim();
+                const target = to?.replace(/^#/, "").trim();
+                if (!from) return "Give the tag to rename, without the '#'.";
+                if (target !== undefined && !target) {
+                    return `Give a new name, or leave "to" out entirely to remove #${from}.`;
+                }
+                if (target === from) return `#${from} is already called that. Nothing to plan.`;
+
+                const known = ctx.index.tagInventory().filter((entry) => isUnder(entry.tag, from));
+                if (known.length === 0) {
+                    return (
+                        `No note carries #${from}. Nothing to plan. Use tag_inventory to see what ` +
+                        `tags this vault actually uses; a tag written only inside a code block is ` +
+                        `not a tag.`
+                    );
+                }
+
+                const nested = known.filter((entry) => entry.tag !== from);
+                if (target === undefined && nested.length > 0) {
+                    // Renaming a parent has an obvious meaning for its children
+                    // and removing one does not: whether #work/acme should go
+                    // with #work is a judgement about what those tags mean.
+                    return (
+                        `#${from} has ${nested.length} tag(s) nested under it: ` +
+                        `${nested.map((entry) => `#${entry.tag}`).join(", ")}. Removing #${from} ` +
+                        `might mean removing those too or might mean leaving them, and guessing ` +
+                        `is worse than asking. Remove them first if they should go, or say which ` +
+                        `exact tag you meant.`
+                    );
+                }
+
+                const selected = new Map<string, IndexedNote>();
+                for (const entry of known) {
+                    for (const note of ctx.index.findByTag(entry.tag)) {
+                        if (note.kind !== "text") continue;
+                        if (folder && !underFolder(note.path, folder)) continue;
+                        selected.set(note.path, note);
+                    }
+                }
+                if (selected.size === 0) {
+                    return `No note under "${folder}" carries #${from}. Nothing to plan.`;
+                }
+
+                const operations: PlanOperation[] = [];
+                const excluded: { path: string; reason: string }[] = [];
+
+                for (const path of [...selected.keys()].sort()) {
+                    let current;
+                    try {
+                        const read = await ctx.reader.read(path, { fresh: true });
+                        if (read.file.kind !== "text") continue;
+                        current = read.file;
+                    } catch (error) {
+                        if (error instanceof NoteNotFoundError) {
+                            excluded.push({ path, reason: "no longer in the vault" });
+                            continue;
+                        }
+                        throw error;
+                    }
+
+                    let retagged;
+                    try {
+                        retagged = retagNote(path, current.text, from, target);
+                    } catch (error) {
+                        if (error instanceof FrontmatterUnreadableError) {
+                            excluded.push({ path, reason: shortReason(error.message) });
+                            continue;
+                        }
+                        throw error;
+                    }
+
+                    if (retagged.text === current.text) continue;
+
+                    operations.push({
+                        kind: "write",
+                        path,
+                        content: { kind: "text", text: retagged.text },
+                        expectedRev: current.rev ?? null,
+                        // Every one of these replaces text that is already
+                        // there, so none of them may be truncated out of the
+                        // plan however many notes carry the tag.
+                        notable: true,
+                        summary: retagged.summary,
+                    });
+                }
+
+                if (operations.length === 0) {
+                    return (
+                        `${selected.size} note(s) are indexed under #${from}, and none of them ` +
+                        `changes: the tag is in a place this cannot edit, such as inside a code ` +
+                        `block.` +
+                        (excluded.length > 0 ? `\n\n${excludedBlock(excluded)}` : "")
+                    );
+                }
+
+                const merges = target !== undefined && ctx.index.findByTag(target).length > 0;
+                const plan = await ctx.executor.plan(operations);
+
+                return [
+                    target === undefined
+                        ? `Removing #${from} from ${operations.length} note(s).`
+                        : `Renaming #${from} to #${target} across ${operations.length} note(s)` +
+                          `${nested.length > 0 ? `, taking ${nested.length} nested tag(s) with it` : ""}.` +
+                          (merges
+                              ? ` #${target} already exists, so this merges the two: notes that ` +
+                                `carried both end up carrying it once.`
+                              : ""),
+                    "",
+                    renderPlan(plan, { excluded }),
+                ].join("\n");
+            }),
+    });
+
+    addTool({
+        name: "plan_move",
+        description:
+            "Work out what moving or renaming a file would do to the links pointing at it, and " +
+            "write nothing. Returns a plan that relocates the file and rewrites every link that " +
+            "would otherwise break or come to mean a different file. Show that plan to the person " +
+            "who asked before calling commit_plan with its ID. Use move_file instead when nothing " +
+            "links to the file; it will tell you to come here if something does.",
+        parameters: z.object({
+            path: z.string().describe("The file to move, as a vault-relative path with its extension."),
+            to: z
+                .string()
+                .describe("The full vault-relative path it should end up at, including the extension."),
+        }),
+        execute: async ({ path, to }, { session }) =>
+            reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
+                if (path === to) return `"${path}" is already where it is. Nothing to plan.`;
+
+                let source;
+                try {
+                    source = (await ctx.reader.read(path, { fresh: true })).file;
+                } catch (error) {
+                    if (error instanceof NoteNotFoundError) {
+                        return (
+                            `There is nothing at "${path}" to move. Check the path with list_notes ` +
+                            `or search_notes.`
+                        );
+                    }
+                    throw error;
+                }
+
+                const destination = await ctx.executor.currentEntry(to);
+                if (destination && !isDeleted(destination)) {
+                    return `"${to}" already exists, so there is nothing to plan. Choose another destination.`;
+                }
+
+                // The vault as it will be, so a rewritten link can be checked
+                // against it rather than assumed to resolve.
+                const after = new Set(ctx.index.allPaths());
+                after.delete(path);
+                after.add(to);
+
+                const impact = ctx.index.resolutionImpact(path, to);
+                const operations: PlanOperation[] = [
+                    {
+                        kind: "move",
+                        from: path,
+                        to,
+                        content:
+                            source.kind === "text"
+                                ? { kind: "text", text: source.text }
+                                : { kind: "binary", bytes: source.bytes },
+                        expectedRev: source.rev ?? null,
+                        notable: true,
+                    },
+                ];
+
+                const excluded: { path: string; reason: string }[] = [];
+                for (const [note, targets] of linkingNotes(ctx.index, path)) {
+                    let current;
+                    try {
+                        current = (await ctx.reader.read(note, { fresh: true })).file;
+                    } catch (error) {
+                        if (error instanceof NoteNotFoundError) {
+                            excluded.push({ path: note, reason: "no longer in the vault" });
+                            continue;
+                        }
+                        throw error;
+                    }
+                    if (current.kind !== "text") continue;
+
+                    const rewritten = rewriteLinkTargets(current.text, {
+                        from: path,
+                        to,
+                        targets,
+                        paths: after,
+                    });
+                    if (rewritten.changed === 0) {
+                        // The index says this note links to the file and the
+                        // rewriter could not find the link to change. Naming it
+                        // is the only honest thing to do: the alternative is a
+                        // plan that quietly leaves a broken link behind.
+                        excluded.push({
+                            path: note,
+                            reason: "links to it in a form this cannot rewrite; check it by hand",
+                        });
+                        continue;
+                    }
+
+                    operations.push({
+                        kind: "write",
+                        path: note,
+                        content: { kind: "text", text: rewritten.text },
+                        expectedRev: current.rev ?? null,
+                        // Every rewrite replaces text somebody wrote, so none of
+                        // them may be truncated out of the plan.
+                        notable: true,
+                        summary: `rewrites ${rewritten.changed} link(s) to point at ${to}`,
+                    });
+                }
+
+                const plan = await ctx.executor.plan(operations);
+                const stolen = impact.repoints.filter((repoint) => repoint.was !== path);
+
+                return [
+                    `Moving "${path}" to "${to}", and rewriting the ${operations.length - 1} note(s) ` +
+                        `that link to it.`,
+                    ...(stolen.length > 0
+                        ? [
+                              "",
+                              `Read this part carefully. ${stolen.length} link(s) point at a different ` +
+                                  `file today and would come to mean the moved one, with nothing in ` +
+                                  `any note changed. Rewriting them is not this tool's business, ` +
+                                  `because they are not links to the file being moved:`,
+                              ...stolen
+                                  .slice(0, 10)
+                                  .map(
+                                      (repoint) =>
+                                          `  ${repoint.source}: [[${repoint.target}]] means ` +
+                                          `${repoint.was} and would mean ${repoint.becomes}`
+                                  ),
+                          ]
+                        : []),
+                    "",
+                    renderPlan(plan, { excluded }),
+                ].join("\n");
+            }),
+    });
+
     addTool(
         {
             name: "commit_plan",
@@ -325,14 +606,26 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string
                     if (result.applied.length === 0) {
                         return `Plan ${plan_id} committed, and every note in it already said exactly that. Nothing was written.`;
                     }
-                    const bytes = result.applied.reduce((sum, receipt) => sum + receipt.size, 0);
-                    const paths = result.applied.slice(0, 10).map((receipt) => `  ${receipt.path}`);
+                    // Counted apart, because a relocation produces two receipts
+                    // and one of them is a deletion. Reporting "3 notes
+                    // written" for a rename that moved one file and edited one
+                    // note, and then listing the old path among the notes
+                    // written, is the kind of small lie that teaches people the
+                    // numbers are noise.
+                    const written = result.applied.filter((receipt) => !receipt.deleted);
+                    const removed = result.applied.filter((receipt) => receipt.deleted);
+                    const bytes = written.reduce((sum, receipt) => sum + receipt.size, 0);
+                    const paths = result.applied
+                        .slice(0, 10)
+                        .map((receipt) => `  ${receipt.path}${receipt.deleted ? " (removed)" : ""}`);
                     const more =
                         result.applied.length > paths.length
                             ? [`  and ${result.applied.length - paths.length} more`]
                             : [];
                     return [
-                        `Committed plan ${plan_id}: ${result.applied.length} note(s) written, ${bytes.toLocaleString()} bytes.`,
+                        `Committed plan ${plan_id}: ${written.length} note(s) written` +
+                            (removed.length > 0 ? `, ${removed.length} removed` : "") +
+                            `, ${bytes.toLocaleString()} bytes.`,
                         ...paths,
                         ...more,
                     ].join("\n");
@@ -381,6 +674,89 @@ function summarise(
     ]
         .filter(Boolean)
         .join("; ");
+}
+
+/** Whether a path sits under a folder, on a separator so `a` misses `ab/c`. */
+function underFolder(path: string, folder: string): boolean {
+    const trimmed = folder.replace(/^\/+|\/+$/g, "");
+    if (!trimmed) return true;
+    return path === trimmed || path.startsWith(`${trimmed}/`);
+}
+
+/**
+ * One note with a tag renamed or removed, in both of the places it can live.
+ *
+ * The frontmatter first, then the body, because the body rewriter works on the
+ * whole note and skips the frontmatter block: doing it the other way round
+ * would have the frontmatter editor reformat text the body rewriter had just
+ * placed. The summary counts them separately, since "3 in the body" and "1 in
+ * frontmatter" are different kinds of change to look at.
+ */
+function retagNote(
+    path: string,
+    text: string,
+    from: string,
+    to: string | undefined
+): { text: string; summary: string } {
+    const { properties } = parseNote(text);
+
+    const set: Record<string, unknown> = {};
+    const remove: string[] = [];
+    let inFrontmatter = 0;
+
+    // `tag` as well as `tags`: Obsidian accepts the singular as a legacy
+    // spelling, and the index reads both, so a rename that skipped it would
+    // leave find_by_tag still returning the note.
+    for (const key of ["tags", "tag"]) {
+        const next = retagProperty(properties[key], { from, to });
+        if (next === undefined) continue;
+        inFrontmatter++;
+        if (Array.isArray(next) && next.length === 0) remove.push(key);
+        else if (typeof next === "string" && next === "") remove.push(key);
+        else set[key] = next;
+    }
+
+    const edited =
+        inFrontmatter === 0
+            ? text
+            : editFrontmatter(path, text, {
+                  ...(Object.keys(set).length > 0 ? { set } : {}),
+                  ...(remove.length > 0 ? { remove } : {}),
+              }).text;
+
+    const body = rewriteInlineTag(edited, { from, to });
+
+    const verb = to === undefined ? `removes #${from}` : `renames #${from} to #${to}`;
+    const where = [
+        body.changed > 0 ? `${body.changed} in the body` : "",
+        inFrontmatter > 0 ? `${inFrontmatter} frontmatter propert${inFrontmatter === 1 ? "y" : "ies"}` : "",
+    ].filter(Boolean);
+
+    return { text: body.text, summary: `${verb}: ${where.join(", ")}` };
+}
+
+/**
+ * The notes that link to a path, each with the target strings it uses.
+ *
+ * The targets come from the index because resolution is what decides which
+ * links are affected, and the rewriter is deliberately incapable of deciding it
+ * for itself: given a search term rather than a resolved set it would edit the
+ * word in a sentence.
+ *
+ * A note that links to itself is skipped. Its links are moving with it, and
+ * they still resolve, since a basename link does not care which folder its
+ * target sits in and a path link inside the moved note names the same file it
+ * always did.
+ */
+function linkingNotes(index: VaultIndex, path: string): Map<string, string[]> {
+    const byNote = new Map<string, string[]>();
+    for (const link of index.backlinks(path)) {
+        if (link.path === path) continue;
+        const targets = byNote.get(link.path) ?? [];
+        targets.push(link.target);
+        byNote.set(link.path, targets);
+    }
+    return byNote;
 }
 
 function excludedBlock(excluded: { path: string; reason: string }[]): string {

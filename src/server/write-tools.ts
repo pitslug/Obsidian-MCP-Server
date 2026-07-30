@@ -40,16 +40,19 @@ import { NoteNotFoundError } from "../vault/reader.js";
 import { editFrontmatter, FrontmatterUnreadableError } from "../note/frontmatter.js";
 import { AmbiguousHeadingError, appendUnderHeading } from "../note/sections.js";
 import { civilDateIn, fillTemplate, inferDailyFormat, TimeZoneError } from "../note/daily.js";
-import type { VaultIndex } from "../index/index.js";
+import type { ResolutionImpact, VaultIndex } from "../index/index.js";
 import {
+    DestinationExistsError,
     LegacyDeletionError,
+    RelocationIncompleteError,
     RevisionConflictError,
     UnwritablePathError,
     WriteTargetMissingError,
+    type RelocateReceipt,
     type WriteExecutor,
     type WriteReceipt,
 } from "../write/index.js";
-import { UnsyncablePathError } from "../vault-model/index.js";
+import { isDeleted, MissingChunkError, UnsyncablePathError, type FileContent } from "../vault-model/index.js";
 import { MissingScopeError, requireScope, SCOPE_WRITE, type SessionAuth } from "../auth/index.js";
 
 export interface WriteToolContext {
@@ -128,6 +131,86 @@ class BinaryTargetError extends Error {
     }
 }
 
+/** A file and the revision it was read at, ready to be written somewhere else. */
+interface RelocationSource {
+    content: FileContent;
+    rev: string;
+    kind: "text" | "binary";
+    size: number;
+}
+
+/**
+ * Read a file for the purpose of putting it at another path.
+ *
+ * Unlike `readForWrite` this accepts an attachment, because filing an Interact
+ * PDF into `Superseded/` is the most likely move in this vault and an
+ * attachment is what it is. Fresh, for the usual reason: the revision handed to
+ * the executor has to be the one the content came from.
+ */
+async function readForRelocate(ctx: WriteToolContext, path: string): Promise<RelocationSource | undefined> {
+    try {
+        const { file } = await ctx.reader.read(path, { fresh: true });
+        return {
+            content:
+                file.kind === "text"
+                    ? { kind: "text", text: file.text }
+                    : { kind: "binary", bytes: file.bytes },
+            rev: file.rev as string,
+            kind: file.kind,
+            size: file.size,
+        };
+    } catch (error) {
+        if (error instanceof NoteNotFoundError) return undefined;
+        throw error;
+    }
+}
+
+/**
+ * The refusal a link check produces, or nothing when the move is clear.
+ *
+ * Both kinds are refused here and both are handed to `plan_move`, which can
+ * rewrite the links and show its work first. The distinction between them is
+ * still worth making in the message: a break is something the person will see
+ * in Obsidian, and a repoint is something they will not.
+ */
+function linkRefusal(impact: ResolutionImpact, from: string, to: string, planTool: string): string {
+    if (impact.breaks.length === 0 && impact.repoints.length === 0) return "";
+
+    const lines: string[] = [
+        `Nothing was written. Moving "${from}" to "${to}" would change what ` + `links mean.`,
+    ];
+
+    if (impact.breaks.length > 0) {
+        lines.push(
+            "",
+            `${impact.breaks.length} link(s) would stop resolving:`,
+            ...impact.breaks.slice(0, 10).map((link) => `  ${link.source}: [[${link.target}]]`),
+            ...(impact.breaks.length > 10 ? [`  and ${impact.breaks.length - 10} more`] : [])
+        );
+    }
+
+    if (impact.repoints.length > 0) {
+        lines.push(
+            "",
+            // Listed second and described at length because this is the one
+            // nobody would otherwise notice: nothing breaks, nothing looks
+            // wrong, and the note now names a different file.
+            `${impact.repoints.length} link(s) would quietly name a different file:`,
+            ...impact.repoints
+                .slice(0, 10)
+                .map((link) => `  ${link.source}: [[${link.target}]] would mean ${link.becomes}`),
+            ...(impact.repoints.length > 10 ? [`  and ${impact.repoints.length - 10} more`] : [])
+        );
+    }
+
+    lines.push(
+        "",
+        `Use ${planTool}, which rewrites the affected links and shows you the whole plan before ` +
+            `anything is written.`
+    );
+    return lines.join("\n");
+}
+
 /** Turn the errors a write can raise into something a model can act on. */
 async function reporting(work: () => Promise<string>): Promise<string> {
     try {
@@ -150,7 +233,11 @@ async function reporting(work: () => Promise<string>): Promise<string> {
             error instanceof DailyNoteUnknownError ||
             error instanceof BinaryTargetError ||
             error instanceof WriteTargetMissingError ||
-            error instanceof LegacyDeletionError
+            error instanceof LegacyDeletionError ||
+            error instanceof DestinationExistsError ||
+            // Carries the fact that the destination exists and the source was
+            // not removed, which is the one thing the caller has to be told.
+            error instanceof RelocationIncompleteError
         ) {
             return error.message;
         }
@@ -489,7 +576,246 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): stri
             }),
     });
 
+    addTool({
+        name: "restore_note",
+        description:
+            "Bring back a note that was deleted, from the record the deletion left behind. Use " +
+            "this when something was removed by mistake, including by delete_note. It works " +
+            "because deleting is soft: the note's content is usually still recoverable, though " +
+            "not always, and this says which. Refuses if something has since been written at the " +
+            "same path, rather than replacing it.",
+        parameters: z.object({
+            path: z.string().describe("Vault-relative path of the deleted note, including the extension."),
+        }),
+        execute: async ({ path }, { session }) =>
+            reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
+
+                const live = await readCurrent(ctx, path);
+                if (live.existed) {
+                    return (
+                        `"${path}" is not deleted, so there is nothing to restore. Read it if you ` +
+                        `want to see what it says now.`
+                    );
+                }
+
+                let deleted;
+                try {
+                    deleted = await ctx.reader.readDeleted(path);
+                } catch (error) {
+                    if (error instanceof MissingChunkError) {
+                        // The one outcome worth explaining properly, because it
+                        // is permanent and it is nobody's mistake: the sync
+                        // plugin collects chunks a tombstone still references,
+                        // which is correct behaviour and is also what makes a
+                        // deletion eventually final.
+                        return (
+                            `"${path}" was deleted and its content can no longer be recovered: ` +
+                            `${error.missing.length} of the pieces it was stored in have since ` +
+                            `been collected, which the sync plugin does to anything no live note ` +
+                            `refers to. Nothing was written. If the note matters, look for it in ` +
+                            `a backup or on a device that has been offline since.`
+                        );
+                    }
+                    throw error;
+                }
+
+                if (!deleted) {
+                    return (
+                        `There is nothing at "${path}", deleted or otherwise. Check the path with ` +
+                        `list_notes or search_notes; a note deleted from a different path is not ` +
+                        `reachable from this one.`
+                    );
+                }
+
+                const content: FileContent =
+                    deleted.file.kind === "text"
+                        ? { kind: "text", text: deleted.file.text }
+                        : { kind: "binary", bytes: deleted.file.bytes };
+
+                const receipt = await ctx.executor.write({
+                    path,
+                    content,
+                    // The tombstone's own revision. Asserting absence would be
+                    // refused as a conflict: a deleted note is not a path with
+                    // nothing at it, it is a path with a record of a deletion.
+                    expectedRev: deleted.rev,
+                    ctime: deleted.file.ctime,
+                });
+
+                return (
+                    `${describe(receipt, "Restored")}\n` +
+                    `The content came from the deletion record itself, which is why this was ` +
+                    `possible; it is byte-for-byte what was there when the note was deleted, and ` +
+                    `not a version from any backup.` +
+                    (deleted.file.kind === "binary"
+                        ? ` Any transcription of this attachment is still stored under this path ` +
+                          `and becomes searchable again.`
+                        : "")
+                );
+            }),
+    });
+
+    addTool({
+        name: "move_file",
+        description:
+            "Move or rename one file in the Obsidian vault, without touching any other note. Use " +
+            "this for reorganising: filing a document into a folder, giving a note a better name. " +
+            "Give the whole destination path including the extension. Refuses, writing nothing, if " +
+            "anything is already at the destination or if the move would change what any link in " +
+            "the vault points at; use plan_move for those, which rewrites the links and shows you " +
+            "the plan first. Accepts attachments as well as notes.",
+        parameters: z.object({
+            path: z.string().describe("The file to move, as a vault-relative path with its extension."),
+            to: z
+                .string()
+                .describe(
+                    "Where it should end up: a full vault-relative path including the filename and " +
+                        "extension. Folders are implied by the path and do not have to exist."
+                ),
+        }),
+        execute: async ({ path, to }, { session }) =>
+            reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
+                return relocateOne(ctx, path, to, { keepSource: false });
+            }),
+    });
+
+    addTool({
+        name: "copy_file",
+        description:
+            "Copy one file in the Obsidian vault to another path, leaving the original where it " +
+            "is. Use it to start a note from an existing one, or to keep a version of a document " +
+            "before it is changed. Give the whole destination path including the extension. " +
+            "Refuses if anything is already there, or if the copy would take inbound links away " +
+            "from the file it was copied from. Accepts attachments as well as notes.",
+        parameters: z.object({
+            path: z.string().describe("The file to copy, as a vault-relative path with its extension."),
+            to: z.string().describe("The full vault-relative path for the copy, including the extension."),
+        }),
+        execute: async ({ path, to }, { session }) =>
+            reporting(async () => {
+                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
+                return relocateOne(ctx, path, to, { keepSource: true });
+            }),
+    });
+
     return registered;
+}
+
+/**
+ * The body of `move_file` and `copy_file`, which differ in one flag.
+ *
+ * Shared rather than written twice: the checks are the interesting part and a
+ * second copy of them would be the one that fell behind. What the flag changes
+ * is which question the link check asks, and that difference is `keepSource`
+ * on `resolutionImpact`, which is the whole reason that parameter exists.
+ *
+ * The link check reads the index, which is a cache and can be behind the vault
+ * by a moment. That is the right trade here: a stale index can only be wrong
+ * about a link that changed in the last second, and the alternative is parsing
+ * every note in the vault before every move.
+ */
+async function relocateOne(
+    ctx: WriteToolContext,
+    path: string,
+    to: string,
+    options: { keepSource: boolean }
+): Promise<string> {
+    const what = options.keepSource ? "copy" : "move";
+    if (path === to) return `"${path}" is already where it is. Nothing was written.`;
+
+    const source = await readForRelocate(ctx, path);
+    if (!source) {
+        return (
+            `There is nothing at "${path}" to ${what}. Check the path with list_notes or ` +
+            `search_notes; a note that was deleted is not there to move either.`
+        );
+    }
+
+    const destination = await ctx.executor.currentEntry(to);
+    if (destination && !isDeleted(destination)) {
+        return (
+            `"${to}" already exists, so nothing was written. Choose another destination, or deal ` +
+            `with the file that is there first.`
+        );
+    }
+
+    const impact = ctx.index.resolutionImpact(path, to, { keepSource: options.keepSource });
+    const refusal = options.keepSource
+        ? copyRefusal(impact, path, to)
+        : linkRefusal(impact, path, to, "plan_move");
+    if (refusal) return refusal;
+
+    const receipt = await ctx.executor.relocate({
+        from: path,
+        to,
+        content: source.content,
+        expectedRev: source.rev,
+        keepSource: options.keepSource,
+    });
+
+    return describeRelocation(receipt, source, options.keepSource);
+}
+
+/**
+ * The refusal for a copy, which cannot break a link and can steal one.
+ *
+ * Adding a path never unresolves anything, so `breaks` is empty by
+ * construction here; what a copy can do is land on a shorter path than the file
+ * it was copied from and take that file's inbound links with it, silently.
+ * There is no plan tool to send this to, because the fix is a different
+ * destination rather than a set of edits.
+ */
+function copyRefusal(impact: ResolutionImpact, from: string, to: string): string {
+    if (impact.repoints.length === 0 && impact.breaks.length === 0) return "";
+    return [
+        `Nothing was written. A copy of "${from}" at "${to}" would take ${impact.repoints.length} ` +
+            `link(s) away from the file they point at now, because the copy would be the shorter ` +
+            `path and nothing in any note would have changed:`,
+        ...impact.repoints
+            .slice(0, 10)
+            .map(
+                (link) =>
+                    `  ${link.source}: [[${link.target}]] would mean ${link.becomes} instead of ${link.was}`
+            ),
+        ...(impact.repoints.length > 10 ? [`  and ${impact.repoints.length - 10} more`] : []),
+        "",
+        `Copy it somewhere deeper, or give the copy a different name.`,
+    ].join("\n");
+}
+
+/**
+ * What a move did, including the checks that passed.
+ *
+ * Naming the checks rather than implying them, because "no links were affected"
+ * is the claim the caller is relying on and it should be visible that something
+ * actually asked the question.
+ */
+function describeRelocation(receipt: RelocateReceipt, source: RelocationSource, copied: boolean): string {
+    const renamed = basenameOf(receipt.from) !== basenameOf(receipt.to);
+    const lines = [
+        `${copied ? "Copied" : renamed ? "Renamed" : "Moved"} "${receipt.from}" to "${receipt.to}".`,
+        `Revision ${receipt.written.rev}, ${source.size.toLocaleString()} bytes, ` +
+            `${receipt.written.chunksWritten} chunk(s) written and ${receipt.written.chunksReused} reused.`,
+        `No link in the vault would break or come to mean a different file, which was checked ` +
+            `before anything was written.`,
+    ];
+
+    if (receipt.transcriptMoved) {
+        lines.push(
+            `The stored transcription of this file ${copied ? "was copied to" : "moved with"} it, so ` +
+                `it is still searchable at the new path.`
+        );
+    }
+    if (receipt.transcriptError) lines.push(receipt.transcriptError);
+    if (receipt.written.replicaPatchError) lines.push(`Note: ${receipt.written.replicaPatchError}`);
+
+    return lines.join("\n");
+}
+
+function basenameOf(path: string): string {
+    return path.slice(path.lastIndexOf("/") + 1);
 }
 
 /**

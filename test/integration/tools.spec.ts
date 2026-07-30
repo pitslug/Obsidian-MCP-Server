@@ -222,6 +222,29 @@ describe("vault_status", () => {
         expect(text).toMatch(/Writes: disabled \(read-only\)/);
         expect(text).toMatch(/Local replica: \d/);
     });
+
+    it("says this vault has no conventions note", async () => {
+        // Distinguishable from one that exists and was passed on, because those
+        // two look identical in a client that then does its own thing.
+        const text = textOf(await client.callTool({ name: "vault_status", arguments: {} }));
+        expect(text).toContain("Conventions: none");
+    });
+
+    it("says the index feed is attached", async () => {
+        // The feed dying used to be permanent and silent. It reconnects now,
+        // and this is the line that says whether it is currently there, since
+        // the warning about it scrolls past in a log nobody is watching.
+        const text = textOf(await client.callTool({ name: "vault_status", arguments: {} }));
+        expect(text).toContain("Index feed: attached");
+    });
+});
+
+describe("what the server tells a client about itself", () => {
+    it("says it is read-only, and does not describe writing", async () => {
+        const text = client.getInstructions() ?? "";
+        expect(text).toContain("read-only");
+        expect(text).not.toContain("Writing is enabled");
+    });
 });
 
 describe("list_notes", () => {
@@ -364,6 +387,14 @@ describe("search and curation", () => {
         const text = textOf(await client.callTool({ name: "vault_health", arguments: {} }));
         expect(text).toMatch(/Unresolved links \(\d+\)/);
         expect(text).toContain("nowhere");
+    });
+
+    it("reports on notes two devices both changed, and finds none here", async () => {
+        // The section matters more than the count. A vault with a conflict in
+        // it reads exactly like one without, so the only way anybody finds out
+        // is by something asking.
+        const text = textOf(await client.callTool({ name: "vault_health", arguments: {} }));
+        expect(text).toContain("Notes two devices both changed (0)");
     });
 });
 
@@ -508,7 +539,9 @@ describe("transcription", () => {
     });
 
     it("makes the handwriting searchable straight away, without a restart", async () => {
-        const text = textOf(await client.callTool({ name: "search_notes", arguments: { query: "Kingfisher" } }));
+        const text = textOf(
+            await client.callTool({ name: "search_notes", arguments: { query: "Kingfisher" } })
+        );
         expect(text).toContain(INK);
         expect(text).toMatch(/«Kingfisher»/i);
     });

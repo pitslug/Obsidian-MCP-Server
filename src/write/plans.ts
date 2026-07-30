@@ -46,7 +46,9 @@ import {
 } from "../vault-model/index.js";
 import {
     assertWritablePath,
+    DestinationExistsError,
     WriteExecutor,
+    WriteTargetMissingError,
     type WriteExecutorOptions,
     type WriteReceipt,
 } from "./executor.js";
@@ -93,12 +95,34 @@ export type PlanOperation = PlanAnnotation &
     (
         | { kind: "write"; path: string; content: FileContent }
         | { kind: "delete"; path: string; hard?: boolean }
+        /**
+         * One operation, not a write and a delete.
+         *
+         * Expressing a relocation as the two kinds either side of it would put
+         * the ordering guarantee at the mercy of the order of an array, and
+         * would let a plan be committed that deleted a source whose destination
+         * write had failed.
+         */
+        | { kind: "move"; from: string; to: string; content: FileContent }
     );
+
+/** The paths an operation touches, source first. */
+function pathsOf(operation: PlanOperation): string[] {
+    return operation.kind === "move" ? [operation.from, operation.to] : [operation.path];
+}
+
+/** The path an operation's recorded revision belongs to. */
+function subjectOf(operation: PlanOperation): string {
+    return operation.kind === "move" ? operation.from : operation.path;
+}
 
 export interface PlannedChange extends PlanAnnotation {
     /** What the operation does to a path that may or may not already exist. */
-    effect: "create" | "update" | "delete";
+    effect: "create" | "update" | "delete" | "move";
+    /** For a move, the destination. Otherwise the note being changed. */
     path: string;
+    /** Where a moved file is now. Absent for everything else. */
+    from?: string;
     id: string;
     /** The target's revision when the plan was made. Undefined for a create. */
     rev: string | undefined;
@@ -119,6 +143,7 @@ export interface Plan {
         creates: number;
         updates: number;
         deletes: number;
+        moves: number;
         unchanged: number;
         bytesBefore: number;
         bytesAfter: number;
@@ -263,12 +288,21 @@ export class PlanningWriteExecutor extends WriteExecutor {
             throw new PlanCeilingError(operations.length, this.ceiling);
         }
 
-        const normalized = operations.map((op) => ({ ...op, path: normalizePrefixedPath(op.path) }));
+        const normalized = operations.map((op) =>
+            op.kind === "move"
+                ? { ...op, from: normalizePrefixedPath(op.from), to: normalizePrefixedPath(op.to) }
+                : { ...op, path: normalizePrefixedPath(op.path) }
+        );
         const seen = new Set<string>();
         for (const op of normalized) {
-            assertWritablePath(op.path);
-            if (seen.has(op.path)) throw new DuplicatePlanTargetError(op.path);
-            seen.add(op.path);
+            // Both ends of a move, because a plan that also edits the note it
+            // is moving, or writes to the path it is moving onto, would have
+            // the second operation working from a revision the first replaced.
+            for (const path of pathsOf(op)) {
+                assertWritablePath(path);
+                if (seen.has(path)) throw new DuplicatePlanTargetError(path);
+                seen.add(path);
+            }
         }
 
         const now = this.now();
@@ -276,8 +310,9 @@ export class PlanningWriteExecutor extends WriteExecutor {
         const movedSinceComposed: string[] = [];
 
         for (const op of normalized) {
-            const id = await this.idFor(op.path);
-            const existing = await this.currentEntry(op.path);
+            const subject = subjectOf(op);
+            const id = await this.idFor(subject);
+            const existing = await this.currentEntry(subject);
             const present = existing !== undefined && !isDeleted(existing);
             const before = present ? (existing as ChunkedEntry) : undefined;
 
@@ -286,7 +321,7 @@ export class PlanningWriteExecutor extends WriteExecutor {
             // fresher one here would paper over a change that landed in
             // between, and the plan would commit happily over the top of it.
             if (op.expectedRev !== undefined && (op.expectedRev ?? null) !== (existing?._rev ?? null)) {
-                movedSinceComposed.push(op.path);
+                movedSinceComposed.push(subject);
                 continue;
             }
 
@@ -295,6 +330,35 @@ export class PlanningWriteExecutor extends WriteExecutor {
                 notable: op.notable,
                 expectedRev: op.expectedRev,
             };
+
+            if (op.kind === "move") {
+                // A move of something that is not there is not a plan with one
+                // useless line in it, it is a plan about nothing. Refused here
+                // rather than at commit, where the review has already happened.
+                if (!present) throw new WriteTargetMissingError(op.from);
+
+                const destination = await this.currentEntry(op.to);
+                if (destination && !isDeleted(destination)) throw new DestinationExistsError(op.to);
+
+                changes.push({
+                    ...annotation,
+                    // Always. A relocation is the operation the plan exists
+                    // for, and the renderer never truncates a notable change
+                    // however long the plan gets.
+                    notable: true,
+                    effect: "move",
+                    path: op.to,
+                    from: op.from,
+                    id,
+                    rev: before?._rev,
+                    sizeBefore: before?.size,
+                    sizeAfter: before?.size,
+                    chunksBefore: before?.children?.length,
+                    chunksAfter: before?.children?.length,
+                    unchanged: false,
+                });
+                continue;
+            }
 
             if (op.kind === "delete") {
                 if (!present) {
@@ -371,6 +435,7 @@ export class PlanningWriteExecutor extends WriteExecutor {
                 creates: changes.filter((c) => c.effect === "create").length,
                 updates: changes.filter((c) => c.effect === "update").length,
                 deletes: changes.filter((c) => c.effect === "delete" && !c.unchanged).length,
+                moves: changes.filter((c) => c.effect === "move").length,
                 unchanged: changes.filter((c) => c.unchanged).length,
                 bytesBefore: changes.reduce((sum, c) => sum + (c.sizeBefore ?? 0), 0),
                 bytesAfter: changes.reduce((sum, c) => sum + (c.sizeAfter ?? 0), 0),
@@ -417,7 +482,20 @@ export class PlanningWriteExecutor extends WriteExecutor {
         for (const [index, op] of operations.entries()) {
             const change = plan.changes[index];
             try {
-                if (op.kind === "delete") {
+                if (op.kind === "move") {
+                    const receipt = await this.relocate({
+                        from: op.from,
+                        to: op.to,
+                        content: op.content,
+                        // Recorded at planning time, checked twice: once above
+                        // against every target at once, and again inside
+                        // relocate against CouchDB.
+                        expectedRev: change?.rev as string,
+                        mtime: stored.now,
+                    });
+                    applied.push(receipt.written);
+                    if (receipt.removed) applied.push(receipt.removed);
+                } else if (op.kind === "delete") {
                     // Nothing to delete, whether the path never existed or is
                     // already a tombstone. Re-deleting a tombstone would look
                     // free and would not be: it writes a new revision that
@@ -444,8 +522,8 @@ export class PlanningWriteExecutor extends WriteExecutor {
                     );
                 }
             } catch (error) {
-                const remaining = operations.slice(index + 1).map((rest) => rest.path);
-                throw new PlanCommitError(id, applied, op.path, remaining, error as Error);
+                const remaining = operations.slice(index + 1).map((rest) => subjectOf(rest));
+                throw new PlanCommitError(id, applied, subjectOf(op), remaining, error as Error);
             }
         }
 

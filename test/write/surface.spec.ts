@@ -86,7 +86,7 @@ describe("the write surface", () => {
         expect(
             blocks.length,
             "found no tool registrations, so this test proves nothing"
-        ).toBeGreaterThanOrEqual(6);
+        ).toBeGreaterThanOrEqual(9);
 
         const unchecked = blocks
             .filter(
@@ -95,5 +95,36 @@ describe("the write surface", () => {
             .map((block) => /name:\s*"([^"]+)"/.exec(block)?.[1] ?? "an unnamed tool");
 
         expect(unchecked, `These write tools do not check vault:write:\n${unchecked.join("\n")}`).toEqual([]);
+    });
+
+    it("checks it in the plan tools too, apart from the one that cannot write", () => {
+        // The plan tools were outside this check until plan_retag was added,
+        // which is the wrong moment to notice: composing a plan reads every
+        // selected note and returns their content, so an unscoped planning tool
+        // leaks a vault to a connection holding only vault:read even before
+        // anything is committed.
+        const source = read("src/server/plan-tools.ts");
+        // On the object literal rather than on "addTool(", because one of these
+        // is registered with a second argument and wraps onto its own line, and
+        // because the helper's own body calls server.addTool(tool).
+        const blocks = source.split(/addTool\(\s*\{/).slice(1);
+
+        expect(
+            blocks.length,
+            "found no tool registrations, so this test proves nothing"
+        ).toBeGreaterThanOrEqual(4);
+
+        // discard_plan throws away an in-memory plan and has no path to the
+        // vault at all. Named here rather than left implicit, so that adding a
+        // second exemption is a deliberate act with a reason next to it.
+        const exempt = new Set(["discard_plan"]);
+        const unchecked = blocks
+            .filter(
+                (block) => !block.includes("requireScope(session as SessionAuth | undefined, SCOPE_WRITE)")
+            )
+            .map((block) => /name:\s*"([^"]+)"/.exec(block)?.[1] ?? "an unnamed tool")
+            .filter((name) => !exempt.has(name));
+
+        expect(unchecked, `These plan tools do not check vault:write:\n${unchecked.join("\n")}`).toEqual([]);
     });
 });

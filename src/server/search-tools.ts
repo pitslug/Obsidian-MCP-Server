@@ -263,9 +263,10 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
     server.addTool({
         name: "vault_health",
         description:
-            "Report curation problems across the vault: links that point at nothing, and notes " +
-            "whose frontmatter could not be parsed. Use this when tidying up, or after renaming " +
-            "or moving notes.",
+            "Report problems across the vault: links that point at nothing, notes whose " +
+            "frontmatter could not be parsed, and notes that two devices changed without seeing " +
+            "each other, which reads cannot show you. Use this when tidying up, and after " +
+            "renaming or moving notes.",
         parameters: z.object({}),
         execute: async () => {
             // Both lists name the note the problem is in, so both are confirmed
@@ -291,6 +292,35 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
                     ? ["  none"]
                     : errors.map((e) => `  ${e.path}: ${e.error.split("\n")[0]}`))
             );
+
+            // The only line here that comes from the replica rather than the
+            // index, and the only one that is not a curation problem. It
+            // belongs in this report because it is the one state in the system
+            // that is otherwise completely invisible: reads return the winning
+            // revision, always the same one, and nothing anywhere mentions that
+            // another version of the note exists.
+            const conflicts = await ctx.reader.conflicts();
+            sections.push("", `Notes two devices both changed (${conflicts.length}):`);
+            if (conflicts.length === 0) {
+                sections.push("  none");
+            } else {
+                sections.push(
+                    ...conflicts
+                        .slice(0, 20)
+                        .map(
+                            (conflict) =>
+                                `  ${conflict.path}: ${conflict.losing + 1} versions, ` +
+                                `${conflict.losing} of which no read will ever return`
+                        )
+                );
+                if (conflicts.length > 20) sections.push(`  … and ${conflicts.length - 20} more`);
+                sections.push(
+                    `  Nothing is lost and nothing is broken. Two devices changed these without ` +
+                        `having seen each other's change, so a version exists that reads do not ` +
+                        `show. Resolve them in Obsidian, through the sync plugin, which is the only ` +
+                        `thing that can show you both.`
+                );
+            }
 
             return sections.join("\n");
         },

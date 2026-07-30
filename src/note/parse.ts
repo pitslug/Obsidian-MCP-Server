@@ -50,7 +50,7 @@ export interface ParsedNote {
  * horizontal rule, and treating it as frontmatter would silently swallow
  * content.
  */
-const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n?---(?:\r?\n|$)/;
+export const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n?---(?:\r?\n|$)/;
 
 /**
  * Regions where tag and link syntax is not syntax.
@@ -80,11 +80,32 @@ export function maskNonContent(text: string): string {
  * tags. May contain letters, digits, underscores, hyphens and slashes. Must be
  * preceded by whitespace or start of line, so `colour#3` is not a tag either.
  */
-const INLINE_TAG = /(^|[\s(\[{>])#([\p{L}\p{N}_/-]*[\p{L}_-][\p{L}\p{N}_/-]*)/gu;
+export const INLINE_TAG = /(^|[\s(\[{>])#([\p{L}\p{N}_/-]*[\p{L}_-][\p{L}\p{N}_/-]*)/gu;
 
-const WIKILINK = /(!?)\[\[([^\]\n]+?)\]\]/g;
-const MARKDOWN_LINK = /(!?)\[[^\]\n]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+export const WIKILINK = /(!?)\[\[([^\]\n]+?)\]\]/g;
+export const MARKDOWN_LINK = /(!?)\[[^\]\n]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
 const HEADING = /^(#{1,6})\s+(.+?)\s*#*\s*$/gm;
+
+/**
+ * The note with everything that is not editable body blanked, offsets kept.
+ *
+ * What anything rewriting a note in place needs: the same view of it the parser
+ * had, so that a match found here is a match the index also saw, and at the
+ * same offset, so the edit can be made against the original text. Frontmatter
+ * goes as well as code and math, because the parser reads properties out of it
+ * rather than reading tags and links, and an edit there is a different kind of
+ * edit.
+ *
+ * Shared by the link rewriter and the tag rewriter rather than written twice.
+ * Two definitions of "where syntax counts" would eventually disagree, and the
+ * one that drifted would be editing the inside of a code fence.
+ */
+export function maskForRewriting(text: string): string {
+    const frontmatter = FRONTMATTER.exec(text);
+    if (!frontmatter) return maskNonContent(text);
+    const head = frontmatter[0].replace(/[^\n]/g, " ");
+    return head + maskNonContent(text.slice(frontmatter[0].length));
+}
 
 export function parseNote(text: string): ParsedNote {
     const { properties, frontmatterError, body } = splitFrontmatter(text);

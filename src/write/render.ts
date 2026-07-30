@@ -114,11 +114,12 @@ export function renderPlan(plan: Plan, options: RenderOptions = {}): string {
  * spent on the least informative number in the plan.
  */
 function headline(plan: Plan, effective: number): string {
-    const { creates, updates, deletes } = plan.totals;
+    const { creates, updates, deletes, moves } = plan.totals;
     const parts = [
         creates > 0 ? `${creates} to create` : "",
         updates > 0 ? `${updates} to change` : "",
         deletes > 0 ? `${deletes} to delete` : "",
+        moves > 0 ? `${moves} to move` : "",
     ].filter(Boolean);
 
     if (effective === 0) return `This plan touches ${plan.changes.length} note(s) and changes none of them.`;
@@ -140,6 +141,13 @@ function headline(plan: Plan, effective: number): string {
  * it out to keep the output tidy is how a plan comes to under-report itself.
  */
 function line(change: PlannedChange): string {
+    // A move is the one change whose old path is the interesting half, so it
+    // leads with both regardless of what the tool had to say about it.
+    if (change.effect === "move") {
+        const where = `${change.from} -> ${change.path}`;
+        return change.summary ? `${where}: ${change.summary}` : where;
+    }
+
     if (change.summary) return `${change.path}: ${change.summary}`;
 
     if (change.effect === "delete") return `${change.path}: delete`;

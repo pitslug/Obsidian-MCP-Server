@@ -251,3 +251,40 @@ surface against a real vault, and this is new write behaviour.
 - **Rewriting links in a moved note's own body.** Nothing to do: its links are
   vault-absolute or basenames, and neither changes meaning because the note
   moved.
+
+## What changed in the building
+
+Written 30 July 2026, after the code. The design above stood, and five things
+came out differently enough to be worth stating rather than leaving someone to
+find by reading both.
+
+**`move_file` refuses on one rule, not four.** The refusals are now "no link
+that resolves to this file may stop resolving to it, and nothing may come to
+mean a different file", which is `resolutionImpact` returning nothing. That
+covers the rename-with-links case the design listed and also a folder move that
+breaks a link written as a full path, which it did not.
+
+**A rewritten link is checked before it is written.** The design called the
+rewrite minimal and surgical, and minimal was not always correct: retargeting
+`[[Peter Litzow.pdf]]` for a file moving under `Superseded/` produces the same
+text, now resolving to the other copy. Each new target is resolved against the
+vault as it will be, and falls back to the full path when the short form no
+longer lands on the right file.
+
+**The transcript store is not called directly.** `WriteExecutor` takes one
+`onRelocated` callback instead, because a second thing turned out to need the
+same moment: the changes feed indexes the destination before the transcription
+follows it, so the destination has to be reindexed afterwards or a transcription
+silently stops being searchable. One callback, told once, with both effects
+wired up where the stores are.
+
+**A planned move carries its content.** `PlanOperation` is
+`{ kind: "move", from, to, content }`, the same shape as a planned write. The
+alternative was for commit to re-read the file, which is a second read of
+something the plan was already composed from.
+
+**Resolution had to be written twice.** `resolutionImpact` asks what resolution
+would look like in a vault that does not exist yet, which no table can answer,
+so `src/index/resolve.ts` restates the four passes in code. The two copies are
+checked against each other over a vault that exercises every pass. Writing the
+second copy is what turned up the unescaped `_` in the first.

@@ -23,6 +23,7 @@ import { isTranscriptStale, type TranscriptStore } from "../attachment/transcrip
 import type { VaultFormatSettings } from "../vault-model/index.js";
 import { NoteNotFoundError } from "../vault/reader.js";
 import { extractAttachment, isImage, mimeTypeFor } from "../attachment/extract.js";
+import { trimConventions, type Conventions } from "./instructions.js";
 
 export interface ToolContext {
     replicator: Replicator;
@@ -43,6 +44,61 @@ export interface ToolContext {
      * places one of them went a day without `delete_note` in it.
      */
     writableTools: () => readonly string[];
+    /**
+     * The vault's conventions note as it was passed to clients at startup.
+     *
+     * Held so that `vault_status` can compare it against the note as it stands
+     * now. Instructions are sent once, when a client connects, so editing that
+     * note has no effect on a session already running, and the symptom of that
+     * is indistinguishable from a client disregarding it.
+     */
+    conventions: Conventions | undefined;
+    /**
+     * Whether the index is currently following the replica.
+     *
+     * A dead feed does not break a read, so nothing about the answers gives it
+     * away: search simply goes on answering from a set of notes that has
+     * stopped growing. It reconnects on its own now, and this is how to see
+     * that it has not yet.
+     */
+    indexFeedAttached: () => boolean;
+}
+
+/**
+ * Whether this client was told the vault's conventions, and whether it was told
+ * the current version of them.
+ *
+ * Worth a line of its own because all three states look the same from the
+ * outside. A vault with no conventions note, a note that was passed on, and a
+ * note edited since the session began all produce a client that appears to be
+ * following its own habits.
+ */
+async function describeConventions(ctx: ToolContext): Promise<string> {
+    if (!ctx.conventions) {
+        return (
+            `none. A "CLAUDE.md" at the vault root is passed to clients as this vault's own ` +
+            `rules when the server starts, and there is no such note here`
+        );
+    }
+
+    let current: string | undefined;
+    try {
+        const { file } = await ctx.reader.read(ctx.conventions.path);
+        current = file.kind === "text" ? trimConventions(ctx.conventions.path, file.text).text : undefined;
+    } catch {
+        // Deleted, or unreadable right now. Either way the answer below is the
+        // useful one: what this session was told, and that it no longer matches.
+        current = undefined;
+    }
+
+    if (current === ctx.conventions.text) {
+        return `"${ctx.conventions.path}", passed to this client when it connected`;
+    }
+    return (
+        `"${ctx.conventions.path}", passed to this client when it connected, and CHANGED since. ` +
+        `Instructions are only sent on connection, so read it again, and reconnect to have the ` +
+        `new version arrive on its own`
+    );
 }
 
 /** Human-readable lag, since a raw millisecond count invites false precision. */
@@ -82,6 +138,13 @@ export function registerTools(server: FastMCP, ctx: ToolContext): void {
                 }`,
                 `Encryption: ${ctx.settings.encrypt ? "on" : "off"}` +
                     (ctx.settings.usePathObfuscation ? ", path obfuscation on" : ""),
+                `Index feed: ${
+                    ctx.indexFeedAttached()
+                        ? "attached"
+                        : "NOT attached, reconnecting. Notes written or edited elsewhere will not " +
+                          "appear in search until it is back"
+                }`,
+                `Conventions: ${await describeConventions(ctx)}`,
             ];
 
             if (status.decodeFailures > 0) {

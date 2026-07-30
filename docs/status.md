@@ -1,7 +1,8 @@
 # Where this is up to
 
 Written 28 July 2026, and updated as each piece landed: the write executor, the
-single-note tools, then the batch and daily ones, then the deployment.
+single-note tools, then the batch and daily ones, then the deployment, then
+moving and renaming, then tagging, then the last few gaps before daily use.
 `docs/design.md` is the plan; this is the progress against it and the things you
 would otherwise have to rediscover.
 
@@ -18,7 +19,7 @@ work.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 615 tests, ~85s
+npm test          # 743 tests, ~90s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -38,10 +39,10 @@ environment, or from Docker secrets in deployment. This repo is public.
 | Index            | SQLite FTS5: search, properties, tags, link graph                                                                |
 | Attachments      | PDF text extraction, indexed and retrievable                                                                     |
 | Handwriting      | Transcriptions stored durably, indexed, survive an index rebuild                                                 |
-| Tools            | Thirteen read tools, plus nine write tools registered only when `READ_ONLY=false`                                |
-| Write executor   | Built and tested: single-note writes, deletes, and the plan/commit protocol. Both halves now have a tool surface |
+| Tools            | Thirteen read tools, plus fourteen write tools registered only when `READ_ONLY=false`                            |
+| Write executor   | Built and tested: single-file writes, deletes, relocation, and the plan/commit protocol, all with a tool surface |
 | Daily notes      | Path template inferred from the vault's own dated filenames, overridable, resolved in a configured time zone     |
-| Acceptance gate  | Met. Step three re-run end to end against `obsidian-writetest` on 29 July 2026, and confirmed in Obsidian         |
+| Acceptance gate  | Met. Step three re-run end to end against `obsidian-writetest` on 30 July 2026, move path included, confirmed in Obsidian |
 | Transport        | stdio and streamable HTTP                                                                                        |
 | Vault contents   | 12 text notes, 15 attachments. Deliberately nearly empty until the OneNote migration starts                      |
 | Deployment       | Live on the Slugworx stack since 29 July 2026, pinned to `:0.1`. `READ_ONLY=false` since 30 July, scope-gated     |
@@ -52,12 +53,32 @@ Thirteen read tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
 `note_links`, `vault_health`, `get_attachment`, `list_untranscribed`,
 `save_transcription`.
 
-Nine write tools, registered only when `READ_ONLY=false`. Six act on a single
-note: `create_note`, `append_note`, `append_daily`, `edit_note`,
-`set_properties`, `delete_note`. Three are the batch path: `plan_set_properties`
-writes nothing and returns a plan, `commit_plan` applies one by ID,
-`discard_plan` throws one away. Absent rather than disabled, so a read-only
-server does not advertise something it will refuse.
+Fourteen write tools, registered only when `READ_ONLY=false`. Nine act on a
+single file: `create_note`, `append_note`, `append_daily`, `edit_note`,
+`set_properties`, `delete_note`, `restore_note`, `move_file`, `copy_file`. Five are the plan
+path: `plan_set_properties`, `plan_move` and `plan_retag` write nothing and
+return a plan, `commit_plan` applies one by ID, `discard_plan` throws one away.
+Absent rather than disabled, so a read-only server does not advertise something
+it will refuse.
+
+The split between the two groups is not a preference about naming. A tool that
+touches one file is a write tool; anything that touches several goes through
+plan and commit, because a multi-note edit reviewed by nobody is the failure the
+plan protocol exists to prevent. A move that changes only the folder touches one
+file. A rename touches every note that links to it. So `move_file` and
+`plan_move` are the same operation on either side of that line, and `move_file`
+refuses and names the other one rather than deciding for itself.
+
+`restore_note` is the counterpart, and it exists because of what `delete_note`
+had to say for itself: that putting the text back was not something this server
+could do. It usually is. A soft delete keeps the document and its chunk list, so
+the note is normally still assemblable out of its own deletion record, and
+restoring it is writing that content back against the tombstone's revision.
+Usually, not always: the plugin's orphan cleanup is entitled to collect chunks no
+live note refers to, and once it has, the note is gone. So the tool assembles
+first and refuses with a plain explanation rather than writing half a note, and
+the acceptance gate checks the recovery against a real database, because whether
+the chunks are still there is not a thing a fixture can answer.
 
 `delete_note` is soft only, with no flag to make it otherwise, and that is not
 timidity. The tombstone a soft delete leaves is what tells another device to
@@ -142,6 +163,153 @@ filed under the wrong day and nothing would report an error. It defaults to the
 host zone, which is right on a laptop, and `deploy/obsidian-mcp.env.example`
 sets it explicitly.
 
+### Moving, renaming and copying
+
+Built 30 July 2026, to `docs/move-rename-design.md`, which measured the vault
+first and found the assumption in the checklist item wrong: every link in this
+vault is a basename, so a move breaks nothing and a rename breaks everything.
+That is what put `move_file` on the single-write path and `plan_move` on the
+plan path.
+
+The check both of them turn on is `VaultIndex.resolutionImpact`, which
+recomputes link resolution with the destination substituted for the source and
+reports two things. A **break** is a link that resolved to something and would
+resolve to nothing. A **repoint** is a link that would resolve to a different
+file, with no text changed anywhere. The second is the one worth the machinery:
+a break is loud, and a repoint leaves the vault reading correctly and meaning
+something else. This vault holds both `Interacts/Peter Litzow.pdf` and
+`Interacts/Superseded/Peter Litzow.pdf`, so it is one folder move away from that
+at any time.
+
+Answering a hypothetical meant writing the resolution rule a second time, in
+code, since no table holds the answer for a vault that has not been written to
+yet. The copies are checked against each other in `test/index/resolve.spec.ts`
+rather than trusted, because a mirror nobody checks is a fork.
+
+Three things follow from a path being a document ID here, and each one is
+somewhere it can be enforced rather than remembered:
+
+- **A relocation is a write and then a delete, in that order**, and
+  `WriteExecutor.relocate` owns both. The worst outcome of an interruption is
+  then a duplicate, which is visible and fixable, rather than a hole where a
+  note used to be. `test/write/executor.spec.ts` constructs the interruption
+  deliberately, because the ordering is the whole safety argument and asserting
+  it is the only way to know it was implemented as designed.
+- **The destination reuses the source's chunks**, which are guaranteed present
+  precisely because the source is still live at that moment. A 4 MiB Interact
+  PDF moves without a byte of it going back over the wire.
+- **In a plan, a relocation is one operation**, `{ kind: "move", from, to }`.
+  Expressed as the two existing kinds it would put the ordering at the mercy of
+  the order of an array, and would let a plan commit a delete whose matching
+  write had failed.
+
+`plan_move` rewrites each affected link with the smallest edit that works: the
+target text changes, and the alias, subpath, embed marker and whitespace do not.
+The one subtlety is that the obvious new text is sometimes the old text.
+Renaming nothing about `[[Peter Litzow.pdf]]` while moving that file under
+`Superseded/` produces the identical link, now resolving to the other copy, so
+every rewrite is checked against the vault as it will be and falls back to the
+full path when the short form no longer lands on the right file.
+
+### Tagging
+
+Built 30 July 2026. `plan_retag` renames, merges or removes a tag across the
+vault, and it is on the plan path because a tag rename is a batch by definition:
+the selector is the tag itself, which is why this one does not take the usual
+selection arguments and cannot be called with no selection at all.
+
+The reason it could not be done with `plan_set_properties` is worth keeping.
+That tool sets a property to a literal, so renaming a tag with it would give
+every selected note the same `tags` value rather than each note its own list
+with one element changed. A tag rename has to compute a value per note. And a
+tag lives in two places that look nothing alike, a `tags:` list in frontmatter
+and `#tag` in the body, both of which the index reads and `find_by_tag` returns,
+so handling one and not the other leaves the vault half renamed with the tool
+reporting success.
+
+Three decisions in it:
+
+- **A rename takes the nested tags with it.** Obsidian treats `#work/acme` as
+  living under `#work`, so leaving it behind would strand it under a parent that
+  no longer exists. `#workshop` is untouched, because a prefix match without the
+  separator is how a rename quietly eats a different tag.
+- **A removal does not do the same thing in reverse.** Removing `#work` when
+  `#work/acme` exists might mean removing those too or might mean leaving them,
+  and it is a judgement about what the tags mean rather than about syntax. It
+  refuses and names them.
+- **A removal takes one space with it**, so "todo #work now" does not end up
+  with a gap in the middle, and takes the space after the tag instead when the
+  tag starts the line or the previous removal already claimed the one before.
+  Spaces only: two at the end of a line are a line break in Markdown.
+
+The frontmatter half keeps the shape it found, so a note written `tags: work
+idea` stays a string and a note with a list stays a list. A rename onto a tag
+the note already carries merges the two rather than listing it twice, and only
+for the collision the rename caused: a note that already listed one tag twice
+keeps both, because collapsing that would be a second change nobody asked for.
+
+### What the server says about itself
+
+The MCP `instructions` string is the first thing a client reads about the vault,
+before any tool is called. It used to be a literal ending "This server is
+currently read-only", and it went on saying that after writing was turned on, so
+every connecting client was told editing was impossible while twelve tools that
+edit sat registered behind the sentence. Nothing failed, because nothing was
+checking a paragraph.
+
+`src/server/instructions.ts` composes it now, from the configuration that
+decides the thing being described. It says whether writes are on, and when they
+are it says the three things a client has to know before using one: that a
+conflict means to read the note again rather than retry, that a delete cannot be
+undone here, and that a plan is meant to be shown to the person who asked before
+`commit_plan` is called. It does not list the write tools, because that list is
+built by the registrations and read back by `vault_status`, and a copy in the
+instructions would be a third place for the same fact.
+
+It also passes on the vault's own `CLAUDE.md`, if it has one, as the vault's
+conventions. That matters more for a vault being started from scratch than for
+one being migrated into: `property_inventory` and `tag_inventory` exist to show
+what conventions already exist before anyone proposes another, and on an empty
+vault they show nothing, which inverts the job. The risk stops being "fail to
+match the existing scheme" and becomes "invent a different one every session".
+Instructions are sent once, when a client connects, so editing that note has no
+effect on a session already running: `vault_status` says whether this client was
+told the conventions and whether they have changed since, because all three
+states otherwise look identical from the outside.
+
+### The index feed, and what a dead one costs
+
+The index follows the replica's changes feed. It used to stop following on any
+error: one log line, `following = false`, and dead until the process restarted.
+Nothing about the answers gave it away, because a stale index does not fail. It
+returns fewer notes, and every one it returns is real, so search goes on looking
+exactly like search while quietly answering from a set of notes that stopped
+growing at some point yesterday. Notes written since are not findable, not in
+`search_notes` and not in the tag or property inventories, and therefore not
+selectable by anything that plans a batch.
+
+It reconnects now, doubling from a second to a minute, and resumes from the last
+sequence it applied rather than from "now", which would skip whatever arrived
+during the outage. `vault_status` says whether the feed is attached, because the
+warning goes to a log nobody is watching and the whole problem with this failure
+is that it does not announce itself.
+
+The confirmation step means a dead feed still cannot surface a deleted note, so
+this remains a staleness problem rather than a correctness one. It is a
+staleness problem that used to last until someone restarted the container.
+
+### Notes two devices both changed
+
+`vault_health` reports conflicts now, and it is the only line in that report
+that comes from the replica rather than the index, and the only one that is not
+a curation problem. A conflict is two devices changing a note without having
+seen each other's change, which is ordinary in a synced vault and is not an
+error. What makes it worth surfacing is that nothing else ever will: CouchDB
+picks a winner deterministically, every read returns that winner, and the other
+version sits in the document indefinitely. Nobody loses work and nobody knows a
+version exists. Obsidian's own sync plugin is the only thing that can show you
+both, so that is where the report sends you.
+
 ## The constraint that governs everything
 
 **The vault at `couchdb.slugworx.net` is live. The acceptance gate is now met,
@@ -159,8 +327,8 @@ suite rather than quietly ending the property.
 
 Three things stand between that one file and the vault. `READ_ONLY` defaults to
 true and is checked before a request is built, not after a response comes back,
-so a read-only deployment cannot reach CouchDB with a PUT at all. The eight
-write tools are registered only when writes are enabled, so a read-only server
+so a read-only deployment cannot reach CouchDB with a PUT at all. The write
+tools are registered only when writes are enabled, so a read-only server
 has no path from a client to the executor at all. And `COUCHDB_DATABASE` still points wherever it is configured to point:
 nothing in the code prefers the real vault.
 
@@ -194,6 +362,13 @@ revision back out of CouchDB after a transcription is saved.
     several notes, a plan composed from a read that went stale while planning,
     and two captures into a fresh daily note.
 
+    Re-run again on 30 July 2026 for the move path, and confirmed in Obsidian:
+    a move that sent no chunks at all, a refusal to move onto an occupied path
+    with the occupant untouched, a copy, and a rename committed in one plan
+    with the link rewrites it needed, aliases, subpaths and embed markers
+    intact. Every check passed. That is the gate met for everything the write
+    surface can now do, rather than for what it could do yesterday.
+
 ## What to do next
 
 A checklist rather than prose, because it is now being worked across two
@@ -208,14 +383,18 @@ machines. Rough priority order within each group.
       asserted absence with a hardcoded `null` revision, so any path holding a
       tombstone refused new content with a conflict that re-reading the note
       could not explain. Deleting a note in Obsidian was enough to reach it.
-- [ ] **Decide what a move or rename means here, then build it.** OneNote has
-      `move_page` and `copy_page`; nothing here can relocate a note, and
-      reorganising as you go is most of what migrating is. The design question
-      first: a rename has to rewrite every `[[wikilink]]` pointing at the old
-      path, which Obsidian does silently in the app, and a move made through
-      this server without that rewrite breaks links quietly. `vault_health`
-      already finds broken links, so the detection half exists. Batch rename and
-      move are also the obvious next plan/commit selections.
+- [x] **A move, rename and copy.** `move_file`, `plan_move` and `copy_file`,
+      30 July 2026, to `docs/move-rename-design.md`. The design question turned
+      out to have a measurable answer: every link in this vault is a basename,
+      so a move breaks nothing and a rename breaks everything, which is what
+      splits the tools across the single-write and plan paths. See "Moving,
+      renaming and copying" above. OneNote parity on this point is now met for
+      one file at a time; a folder is still many files, which is the batch case
+      below.
+- [ ] **Batch move and rename by selector.** The obvious next plan operations,
+      and deliberately not built yet: the single-file behaviour has to be right
+      before it is multiplied by forty. Moving a folder is this wearing a
+      different hat and should use a selector rather than a tool of its own.
 - [ ] **Decide whether OneNote ink or its transcription is the source of truth.**
       OneNote treats handwriting as first class (`get_page_ink`,
       `render_page_ink`). Here a handwritten page arrives as an image or PDF
@@ -223,8 +402,25 @@ machines. Rough priority order within each group.
       `save_transcription`. Better for search, but it is transcription rather
       than ink, and the transcriptions are the only data in this system that
       nothing can recompute.
+- [x] **Tag editing.** `plan_retag`, 30 July 2026. The vault is being started
+      from scratch rather than migrated into in bulk, so reorganising and
+      tagging through Claude is the actual use, and tag editing was the half of
+      it that did not exist: reading tags worked, changing one across the vault
+      was not expressible. See "Tagging" above.
+- [x] **Undo for a delete.** `restore_note`, 30 July 2026. OneNote has no
+      counterpart and this is not parity: it is that a server which can delete
+      and cannot undelete is the wrong asymmetry to point at somebody's only
+      copy of their notes.
 - [ ] Run the same task through both servers side by side once, rather than
       comparing tool lists. The gaps above came from the registered tool names.
+- [ ] **An extensionless link to something that is not a note does not
+      resolve.** Obsidian opens the PDF for `[[Peter Litzow]]` when nothing else
+      carries that name; both copies of the resolution rule here only ever
+      append `.md`, so the link reads as broken. Written down rather than fixed
+      on 30 July 2026, because changing what an existing link means is not a
+      thing to do inside a change about moving files, and `vault_health` at
+      least reports it. `test/index/resolve.spec.ts` pins the current behaviour,
+      so fixing it will fail that test rather than surprise anyone.
 
 ### Finishing the deployment
 
@@ -256,18 +452,20 @@ has the detail. Switch one is done and is meant to be lived with.
 
 ### Smaller things, whenever
 
-- [ ] **The index changes feed does not restart itself.** On an error it logs,
-      sets `following = false`, and stays dead until the process restarts. The
-      confirmation step means a dead feed can no longer surface a deleted note,
-      so this is now a staleness problem rather than a correctness one: new and
-      edited notes stop being findable. Reconnect with backoff, and treat a
-      repeated "Index held X, which the vault does not" warning as the symptom.
+- [x] **The index changes feed restarts itself.** 30 July 2026. Backoff from a
+      second to a minute, resuming from the last sequence applied, and
+      `vault_status` says whether it is attached. See "The index feed" above.
 - [ ] `get_attachment` refuses an attachment over `ATTACHMENT_SIZE_CAP` but will
       still serve a stored transcription for it. Untested; add one.
 - [ ] E2EE is not enabled on the vault. The code handles it and the differential
       tests cover it, but no real encrypted vault has been read.
-- [ ] Rotate the CouchDB `obsidian` password. It was passed on a command line
-      and pasted into a chat on 29 July 2026.
+- [x] **Rotate the CouchDB `obsidian` password.** Done 30 July 2026. It had been
+      passed on a command line and pasted into a chat the day before. Anything
+      holding the old one fails closed and confusingly: repeated failed auth
+      returns "Name or password is incorrect" even once the right password is
+      supplied, because the 600k-iteration PBKDF2 hash backs up. So check the
+      deployed container and every synced device, rather than waiting to be
+      told.
 - [ ] The executor refuses to soft-delete a pre-chunking (`type: "notes"`) note
       on an encrypted vault, because the tombstone would carry the note's
       plaintext. If the vault turns out to hold such notes, the fix is to rewrite
@@ -471,6 +669,76 @@ server with `READ_ONLY=false`.
   generalises past this bug. `NoteNotFoundError` means "nothing to read here",
   which is not the same claim as "nothing is here", and any code that treats the
   first as the second is one deleted note away from being wrong.
+- **A cache that stops updating does not look broken, it looks smaller.** The
+  index feed died on any error and stayed dead until the process restarted.
+  Every answer it gave afterwards was correct, which is exactly the problem:
+  search returns real notes, just not all of them, and there is no shape of
+  answer that says "and eleven others you wrote since Tuesday". It reconnects
+  with backoff now and `vault_status` says whether it is attached. The general
+  version: a failure that degrades an answer rather than preventing one needs
+  something that reports its own health, because nobody will infer it from the
+  output.
+- **A soft delete is recoverable right up until the plugin tidies up.** A
+  tombstone keeps its chunk list, which is what `restore_note` rests on, and the
+  plugin's orphan cleanup is entitled to collect chunks no live note references.
+  Both facts are true and the second one is invisible, so the tool assembles the
+  note before claiming it can restore anything, and says plainly that the pieces
+  are gone when they are. The gate checks this against a real database, since
+  whether the chunks are still there is precisely what a fixture cannot tell you.
+- **A paragraph can be wrong for a day and nothing will notice.** The server's
+  MCP instructions said it was read-only, in a hardcoded string, and kept saying
+  it after `READ_ONLY=false` went live. Every client was told writing was
+  impossible while twelve write tools sat registered behind the sentence, and
+  the failure mode is a model that reasonably declines to try. Prose about a
+  system is a claim about it, and the same rule applies as to the tool list in
+  `vault_status`: compute it from the thing it describes, and put a test on it.
+  `test/server/instructions.spec.ts` reads like a test of writing and is a test
+  of a fact.
+- **A structural test only covers the file it names.** The scope check in
+  `test/write/surface.spec.ts` read `write-tools.ts` and nothing else, so the
+  plan tools were outside it until `plan_retag` was added, which is the wrong
+  moment to notice: composing a plan reads every selected note and returns their
+  content, so an unscoped planning tool would hand a vault to a connection
+  holding only `vault:read` before anything was committed. It covers both files
+  now, with `discard_plan` exempted by name rather than by accident.
+- **A link target goes into a LIKE pattern, so `_` in a filename was a
+  wildcard.** Link resolution matched a basename with `n.path LIKE '%/' ||
+  links.target`, and SQLite reads `_` as "any character", so `[[report_2026]]`
+  resolved against `report-2026.md` and, ties going to the shortest path, could
+  win. `notesUnder` had already learned this about folder names and escapes for
+  it; this was the same bug where it decides what a link means rather than what
+  a batch includes. Found while writing the second copy of the resolution rule,
+  which is an argument for having written it.
+- **The changes feed did not re-resolve links after a removal, so a moved file
+  arrived unreachable.** A move produces two changes: the destination, which was
+  indexed and re-resolved, and then the source's tombstone, which called
+  `index.remove` and stopped. `remove` clears the resolution of every link
+  pointing at the removed path, so links to the moved file sat unresolved until
+  the next restart. Resolution changes when a path disappears, and not only by
+  breaking: in a vault with two files of the same name the other one takes over,
+  which is Obsidian's behaviour and is exactly what a move depends on.
+- **The feed indexed the moved attachment before its transcription followed
+  it.** `relocate` writes the destination, deletes the source, and only then
+  tells the stores outside the vault. The replica patch means the feed sees the
+  destination immediately, so it indexed the new path while the transcription
+  was still filed under the old one, found nothing to index for it, and never
+  looked again: a scan a model had been paid to read would silently stop being
+  findable. The listener now reindexes the destination after the transcription
+  moves. The general shape is worth keeping: a cache fed by an event is stale
+  with respect to anything that happens after the event.
+- **The obvious rewrite of a link is sometimes the text it already had.**
+  Renaming nothing about `[[Peter Litzow.pdf]]` while filing that file under
+  `Superseded/` produces the same link, which now resolves to the other copy of
+  that name. The rewrite would have reported success and changed nothing while
+  the note came to mean something else. Every rewritten target is now checked
+  against the vault as it will be, and falls back to the whole path when the
+  short form no longer lands on the right file.
+- **A commit that relocates something returns two receipts for one change.**
+  `commit_plan` counted receipts, so a rename that moved one file and edited one
+  note reported "3 note(s) written" and listed the old path among the notes
+  written. Small, and the same species as the startup warning that undercounted:
+  a number nobody can reconcile with the plan they just read teaches them that
+  the numbers are noise. Deletions are now counted and marked separately.
 - **Traefik 400s a percent-encoded slash, so the public CouchDB hostname is
   unusable for anything that addresses a document by ID.** A document ID here is
   the vault path, so `daily/2026-07-28.md` is requested as
@@ -550,17 +818,32 @@ To build one from scratch again:
     `verify:write` refuses to run at all until a device has published settings;
     this is why.
 
-Then the machine half:
+Then the machine half. Note the address: this script reads every result back
+by document ID, and a document ID here is the vault path, so the public
+hostname 400s on the first note in a folder. See the Traefik entry below.
 
-```bash
-npm run verify:write -- --url 'https://USER:PASS@couchdb.slugworx.net' --db obsidian-writetest --keep
+```powershell
+$env:COUCHDB_URL = "http://192.168.50.2:9113"
+$env:COUCHDB_USER = "obsidian"
+$env:COUCHDB_PASSWORD = "..."
+npm run verify:write -- --db obsidian-writetest --reset --keep
 ```
+
+`--reset` on any run after one that used `--keep`: deleting the folder in
+Obsidian is a soft delete, so every path still holds a document and the first
+create would be refused.
 
 It creates a note, edits it reusing chunks, refuses a stale write, plans and
 commits a batch, refuses a stale plan, soft-deletes, writes over the tombstone,
-and reads every result back out of CouchDB through the vault model rather than
-through its own client or the replica. It checks the local replica for conflict
-branches.
+moves a file, refuses a move onto an occupied path, copies one, and renames one
+in a plan committed together with the link rewrites that rename needs. It reads
+every result back out of CouchDB through the vault model rather than through its
+own client or the replica, and checks the local replica for conflict branches.
+
+The move checks are worth watching rather than only passing. The one that says
+"sent no chunks" is the difference between moving a 4 MiB scan and uploading
+one, and the tombstone check is what makes a rename reach the other devices as a
+removal rather than as a file they still hold.
 
 It then covers the rest of the write surface. **Inserting under a heading** is
 the one worth understanding: every other edit in the run appends at the end,
@@ -595,6 +878,13 @@ GET still returns it, and the first create asserts absence. Without `--reset`
 the script now says so before it replicates, rather than at the first write a
 minute later.
 
+`plan_retag` deliberately added nothing to this script. It composes ordinary
+writes and commits them through the plan protocol, both of which the run already
+covers; what is new in it is which text it composes, and that is a question for
+the unit tests rather than for a script that exists to prove documents reach
+CouchDB intact. A change that writes a new *shape* of document belongs here. A
+change that writes different words does not.
+
 Only when both halves have passed does anything point at `obsidiandb`, and it
 does so with `READ_ONLY` on for a first period.
 
@@ -618,6 +908,10 @@ npm run verify -- --url 'https://USER:PASS@couchdb.slugworx.net/?db=obsidiandb'
 npm run verify -- --url '...' --all          # every file, not a sample
 npm run verify -- --url '...' --census       # where every document went
 npm run verify -- --url '...' --attachments  # which attachments have text
+
+The public hostname is safe for this one, and only this one: it reads through
+replication and `_all_docs`, never a document by ID. That is exactly why it
+never found the Traefik problem.
 ```
 
 Nothing above writes.
@@ -627,9 +921,13 @@ against `obsidiandb`. See below.
 
 The server, over stdio, with a client attached so it does something visible:
 
-```bash
-COUCHDB_URL='https://USER:PASS@couchdb.slugworx.net/?db=obsidiandb' npm run try
+```powershell
+$env:COUCHDB_URL = "http://USER:PASS@192.168.50.2:9113/?db=obsidiandb"
+npm run try
 ```
+
+The internal address again, and for the same reason: `read_note` with
+`fresh=true` fetches by document ID.
 
 `npm run try` pins `REPLICA_PATH`, `INDEX_PATH` and `TRANSCRIPT_PATH` under
 `tmp/`, so a scratch run cannot open or damage a real store.

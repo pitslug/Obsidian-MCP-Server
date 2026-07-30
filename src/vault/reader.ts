@@ -142,6 +142,44 @@ export class VaultReader {
         return alive;
     }
 
+    /**
+     * Notes the replica holds more than one current revision of.
+     *
+     * A conflict happens when two devices change the same note without having
+     * seen each other's change, which is ordinary in a synced vault and is not
+     * an error. What makes it worth reporting is that nothing about it is
+     * visible: CouchDB picks a winner deterministically, every read returns
+     * that winner, and the other version sits in the document indefinitely.
+     * Nobody loses work and nobody knows a version exists.
+     *
+     * The count is the number of revisions that lost, so one conflicting
+     * revision means two versions of the note exist.
+     */
+    async conflicts(): Promise<{ path: string; losing: number }[]> {
+        const found: { path: string; losing: number }[] = [];
+
+        for (const [startkey, endkey] of FILE_RANGES) {
+            const page = (await this.db.allDocs({
+                startkey,
+                endkey,
+                include_docs: true,
+                conflicts: true,
+            } as never)) as unknown as { rows: { doc?: Record<string, unknown> }[] };
+
+            for (const row of page.rows) {
+                const doc = row.doc;
+                if (!doc || !isFileEntry(doc)) continue;
+                if (isDeleted(doc as { deleted?: boolean; _deleted?: boolean })) continue;
+
+                const losing = (doc._conflicts as string[] | undefined)?.length ?? 0;
+                if (losing === 0) continue;
+                found.push({ path: String(entryPath(doc as never)), losing });
+            }
+        }
+
+        return found.sort((a, b) => a.path.localeCompare(b.path));
+    }
+
     async read(path: string, options: ReadOptions = {}): Promise<ReadResult> {
         const id = await this.idFor(path);
         const status = this.options.replicator.status();
@@ -166,6 +204,33 @@ export class VaultReader {
 
         const file = await this.assemble(entry);
         return { file, lagMs: status.lagMs, verified };
+    }
+
+    /**
+     * Read a note that has been deleted, out of its own tombstone.
+     *
+     * A soft delete keeps the document and its chunk list, which is what makes
+     * the deletion reversible at all, so most of the time the text is still
+     * assemblable. Most of the time, not always: the plugin's orphan cleanup is
+     * entitled to collect chunks a tombstone references, and once it has, the
+     * note is gone for good. This throws `MissingChunkError` in that case
+     * rather than returning a partial note, because a restore that quietly puts
+     * back half a note is worse than one that fails.
+     *
+     * Read fresh, because the caller is about to write against the revision.
+     * Undefined means there is nothing at this path at all, or something that
+     * is not deleted; both are the caller's to explain.
+     */
+    async readDeleted(path: string): Promise<{ file: AssembledFile; rev: string } | undefined> {
+        const id = await this.idFor(path);
+        const remote = await this.options.fetchRemote?.(id);
+        const entry = (remote ?? (await this.getDoc<FileEntry>(id))) as FileEntry | undefined;
+
+        if (!entry || !isFileEntry(entry) || !isDeleted(entry)) return undefined;
+        const rev = (entry as { _rev?: string })._rev;
+        if (!rev) return undefined;
+
+        return { file: await this.assemble(entry), rev };
     }
 
     /**

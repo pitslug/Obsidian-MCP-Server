@@ -103,6 +103,46 @@ export class WriteTargetMissingError extends Error {
     }
 }
 
+/**
+ * Something is already at the destination of a move or a copy.
+ *
+ * Refused rather than overwritten, for the reason `create_note` refuses: the
+ * caller asked to put a file somewhere, not to replace what was there, and the
+ * two are indistinguishable in the request.
+ */
+export class DestinationExistsError extends Error {
+    constructor(path: string) {
+        super(
+            `"${path}" already exists, so nothing was moved. Choose another destination, or ` +
+                `deal with the file that is there first.`
+        );
+        this.name = "DestinationExistsError";
+    }
+}
+
+/**
+ * The destination was written and the source could not be removed.
+ *
+ * The state the execution order is chosen to produce when something goes wrong
+ * partway: a duplicate, which is visible and fixable, rather than a hole where
+ * a note used to be. Saying so plainly is the whole value of having chosen it.
+ */
+export class RelocationIncompleteError extends Error {
+    constructor(
+        readonly from: string,
+        readonly to: string,
+        readonly written: WriteReceipt,
+        override readonly cause: Error
+    ) {
+        super(
+            `"${to}" was written, and "${from}" could not then be removed: ${cause.message} ` +
+                `Both paths now hold the same content. Nothing was lost; delete the one you do not ` +
+                `want, in Obsidian or with delete_note.`
+        );
+        this.name = "RelocationIncompleteError";
+    }
+}
+
 export interface WriteRequest {
     path: string;
     content: FileContent;
@@ -121,7 +161,74 @@ export interface WriteRequest {
     expectedRev: string | null;
     /** Modification time to record. Defaults to now. */
     mtime?: number;
+    /**
+     * Creation time to record, for content that has one already.
+     *
+     * Normally derived: taken from whatever is at the path, and set to `mtime`
+     * when nothing is. A relocated file breaks that, because its destination
+     * path has nothing to derive from and its creation time is a real fact
+     * about it. Without this every moved note sorts as newly created, which is
+     * invisible until somebody sorts by it.
+     */
+    ctime?: number;
 }
+
+/**
+ * Move or copy a file to another path.
+ *
+ * A path is a document ID in this storage format, so relocating is not a
+ * mutation: it is a new document and the removal of an old one. See `relocate`
+ * for why those two steps belong to one method.
+ */
+export interface RelocateRequest {
+    from: string;
+    to: string;
+    /** The content read from `from`, and the revision it was read at. */
+    content: FileContent;
+    expectedRev: string;
+    /** Leave the source in place, which makes this a copy rather than a move. */
+    keepSource?: boolean;
+    mtime?: number;
+}
+
+export interface RelocateReceipt {
+    from: string;
+    to: string;
+    /** The write that created the destination. */
+    written: WriteReceipt;
+    /** The removal of the source. Absent for a copy. */
+    removed: WriteReceipt | undefined;
+    /** True when a stored transcription followed the file. */
+    transcriptMoved: boolean;
+    /** Set when the vault write succeeded and the transcription did not follow. */
+    transcriptError: string | undefined;
+}
+
+/** What the stores outside the vault did about a file that moved. */
+export interface RelocationEffects {
+    /** True when a stored transcription followed the file. */
+    transcriptMoved: boolean;
+}
+
+/**
+ * Told that a file changed path, so that whatever keys on a path can follow.
+ *
+ * Two things outside the vault do: the transcript store, which would otherwise
+ * orphan the one reading in this system that cannot be recomputed, and the
+ * search index, which has probably already indexed the destination from the
+ * changes feed and done so before the transcription arrived.
+ *
+ * A callback rather than the stores themselves, because this unit has no
+ * business with either. What it has is the only moment at which anything knows
+ * a path changed, and there are two callers of it: the single-file tools and a
+ * committed plan. Doing the work in the tool layer would work until the second
+ * one, where a forgotten line orphans a reading nobody is watching for.
+ */
+export type RelocationListener = (
+    from: string,
+    to: string,
+    options: { keepSource: boolean }
+) => Promise<RelocationEffects> | RelocationEffects;
 
 export interface DeleteRequest {
     path: string;
@@ -162,6 +269,8 @@ export interface WriteExecutorOptions {
     settings: VaultFormatSettings;
     transform: TransformContext;
     readOnly: boolean;
+    /** Told when a file changes path, so the stores keyed on paths can follow. */
+    onRelocated?: RelocationListener;
     /** Called for a replica patch failure, which is a warning rather than an error. */
     onWarning?: (message: string) => void;
     /** Injectable clock, so plan expiry is testable without waiting. */
@@ -211,6 +320,25 @@ export class WriteExecutor {
 
     /** Write a file, creating it if it does not exist. */
     async write(request: WriteRequest): Promise<WriteReceipt> {
+        return this.writeWith(request);
+    }
+
+    /**
+     * The write, with the option of reusing chunks from somewhere else.
+     *
+     * Only `relocate` passes the second argument, and it passes the chunks of
+     * the file being moved. Those are safe to skip sending for exactly the
+     * reason `reusableChunkIds` gives about an edit: they belong to a document
+     * that is still live at that moment, so CouchDB is guaranteed to hold them.
+     *
+     * Kept off `WriteRequest` on purpose. "Do not send these chunks, I promise
+     * they are there" is a claim only this file is in a position to make, and
+     * getting it wrong writes a note referencing chunks that exist nowhere.
+     */
+    protected async writeWith(
+        request: WriteRequest,
+        alsoReusable?: ReadonlySet<string>
+    ): Promise<WriteReceipt> {
         this.assertWritable(`write "${request.path}"`);
         const path = normalizePrefixedPath(request.path);
         assertWritablePath(path);
@@ -227,9 +355,9 @@ export class WriteExecutor {
         const mtime = request.mtime ?? now;
         // Creation time survives an edit. Losing it is invisible until someone
         // sorts by it, and then every note edited through here sorts as new.
-        const ctime = existing && !isDeleted(existing) ? existing.ctime : mtime;
+        const ctime = request.ctime ?? (existing && !isDeleted(existing) ? existing.ctime : mtime);
 
-        const previousChildren = reusableChunkIds(existing);
+        const previousChildren = new Set([...reusableChunkIds(existing), ...(alsoReusable ?? [])]);
 
         const composed = await composeWrite(path, request.content, {
             settings: this.options.settings,
@@ -336,6 +464,109 @@ export class WriteExecutor {
             size: existing.size ?? 0,
             replicaPatchError: patchError,
         };
+    }
+
+    /**
+     * Move or copy a file to another path.
+     *
+     * A path is a document ID here, so this is a new document and the removal
+     * of an old one, and the order of those two is the whole safety argument:
+     *
+     *  1. Read the source fresh, content and revision as one observation. The
+     *     caller does the reading, the way every write tool does, and hands the
+     *     revision over; this checks it against CouchDB before anything moves.
+     *  2. Write the destination.
+     *  3. Delete the source, against the revision from step one.
+     *  4. Move the transcription, if there is one.
+     *
+     * In that order the worst outcome of an interruption is a duplicate, which
+     * is visible and fixable. In the other order it is a hole where a note used
+     * to be. Same reasoning as writing chunks before the note document.
+     *
+     * Steps two and three are one method rather than two calls from a tool
+     * because the order is the guarantee, and a guarantee implemented by the
+     * sequence of two calls in a tool is one the next tool gets wrong.
+     */
+    async relocate(request: RelocateRequest): Promise<RelocateReceipt> {
+        const keepSource = request.keepSource ?? false;
+        const verb = keepSource ? "copy" : "move";
+        this.assertWritable(`${verb} "${request.from}" to "${request.to}"`);
+
+        const from = normalizePrefixedPath(request.from);
+        const to = normalizePrefixedPath(request.to);
+        assertWritablePath(from);
+        assertWritablePath(to);
+        if (from === to) {
+            throw new Error(`"${from}" is already where it is. Nothing was written.`);
+        }
+
+        const fromId = await this.idFor(from);
+        const sourceRaw = await this.couch.get(fromId);
+        const source = sourceRaw
+            ? ((await decodeDocument(sourceRaw as never, this.options.transform)) as unknown as FileEntry)
+            : undefined;
+        if (!source || isDeleted(source)) throw new WriteTargetMissingError(from);
+        this.assertExpectedRevision(fromId, request.expectedRev, source._rev);
+        // A move deletes the source, and a tombstone for a pre-chunking note on
+        // an encrypted vault would publish its plaintext. A copy writes no
+        // tombstone, so it is not reached by this.
+        if (!keepSource) this.assertTombstoneSafe(source, from);
+
+        const toId = await this.idFor(to);
+        const destinationRaw = await this.couch.get(toId);
+        const destination = destinationRaw
+            ? ((await decodeDocument(
+                  destinationRaw as never,
+                  this.options.transform
+              )) as unknown as FileEntry)
+            : undefined;
+        if (destination && !isDeleted(destination)) throw new DestinationExistsError(to);
+
+        const written = await this.writeWith(
+            {
+                path: to,
+                content: request.content,
+                // A tombstone at the destination is a document, so writing over
+                // it means naming its revision rather than asserting absence.
+                expectedRev: destination?._rev ?? null,
+                mtime: request.mtime,
+                ctime: source.ctime,
+            },
+            // Guaranteed present because the source is still live at this
+            // point, which is the same guarantee an edit relies on. Without it
+            // a 4 MiB attachment re-sends 4 MiB to a server already holding
+            // every chunk of it.
+            reusableChunkIds(source)
+        );
+
+        let removed: WriteReceipt | undefined;
+        if (!keepSource) {
+            try {
+                removed = await this.remove({ path: from, expectedRev: source._rev as string });
+            } catch (error) {
+                throw new RelocationIncompleteError(from, to, written, error as Error);
+            }
+        }
+
+        // Last, and outside the failure path above, because a transcription
+        // left under the old path is a safe failure: the file has moved, the
+        // reading still exists, and list_untranscribed already reports it as an
+        // orphan and says how to reattach one. Losing it would not be safe,
+        // which is why nothing here deletes.
+        let transcriptMoved = false;
+        let transcriptError: string | undefined;
+        try {
+            const effects = await this.options.onRelocated?.(from, to, { keepSource });
+            transcriptMoved = effects?.transcriptMoved ?? false;
+        } catch (error) {
+            transcriptError =
+                `The file was ${keepSource ? "copied" : "moved"} and its stored transcription was ` +
+                `not: ${(error as Error).message}. It is still filed under "${from}", where ` +
+                `list_untranscribed reports it.`;
+            this.options.onWarning?.(transcriptError);
+        }
+
+        return { from, to, written, removed, transcriptMoved, transcriptError };
     }
 
     protected assertWritable(what: string): void {

@@ -15,7 +15,19 @@ import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { classifyProperty, parseNote, propertyValueToText } from "../note/parse.js";
 import { DROP_ALL, SCHEMA, SCHEMA_VERSION } from "./schema.js";
+import { candidateTargets, resolveTarget } from "./resolve.js";
 import type { AssembledFile } from "../vault-model/index.js";
+
+/**
+ * A link target, escaped so LIKE reads it as text.
+ *
+ * `_` in a LIKE pattern means "any character", so without this a link written
+ * `[[report_2026]]` also resolves against `report-2026.md`, silently and in
+ * favour of whichever is shorter. `notesUnder` learned the same lesson about
+ * folder names; this is the other half of it, and the one that decides what a
+ * link means rather than what a batch includes.
+ */
+const LIKE_SAFE_TARGET = `REPLACE(REPLACE(REPLACE(links.target, '\\', '\\\\'), '%', '\\%'), '_', '\\_')`;
 
 export interface IndexedNote {
     path: string;
@@ -42,6 +54,26 @@ export interface PropertyKeySummary {
 export interface TagSummary {
     tag: string;
     noteCount: number;
+}
+
+/** A link, named by the note holding it and the target as written. */
+export interface LinkReference {
+    source: string;
+    target: string;
+}
+
+/** A link that would resolve somewhere else, with both answers. */
+export interface ResolutionRepoint extends LinkReference {
+    was: string;
+    becomes: string;
+}
+
+/** What relocating a file would do to the vault's links. */
+export interface ResolutionImpact {
+    /** Links that resolve to something now and would resolve to nothing. */
+    breaks: LinkReference[];
+    /** Links that would quietly name a different file. */
+    repoints: ResolutionRepoint[];
 }
 
 export interface LinkRow {
@@ -351,11 +383,13 @@ export class VaultIndex {
         //
         // Ties within a pass go to the shortest path, which is Obsidian's
         // behaviour: a note at the vault root wins over a deeply nested one.
+        // The path itself breaks a tie between two of equal length, so that
+        // asking twice gives the same answer.
         const passes = [
             `n.path = links.target`, // exact path, including extension
             `n.path = links.target || '.md'`, // path without the extension
-            `n.path LIKE '%/' || links.target`, // basename, with extension
-            `n.path LIKE '%/' || links.target || '.md'`, // basename, without
+            `n.path LIKE '%/' || ${LIKE_SAFE_TARGET} ESCAPE '\\'`, // basename, with extension
+            `n.path LIKE '%/' || ${LIKE_SAFE_TARGET} || '.md' ESCAPE '\\'`, // basename, without
         ];
 
         this.db.exec("BEGIN");
@@ -366,7 +400,7 @@ export class VaultIndex {
                     UPDATE links SET resolved_path = (
                         SELECT n.path FROM notes n
                         WHERE ${match}
-                        ORDER BY LENGTH(n.path)
+                        ORDER BY LENGTH(n.path), n.path
                         LIMIT 1
                     )
                     WHERE resolved_path IS NULL AND target <> ''
@@ -377,6 +411,74 @@ export class VaultIndex {
             this.db.exec("ROLLBACK");
             throw error;
         }
+    }
+
+    /**
+     * What moving a file would do to the links that point at things.
+     *
+     * The question a move has to answer before it happens, and the reason it is
+     * asked here rather than in the tool: only the index knows which links
+     * resolve to what, and resolution is what a move disturbs. Two kinds of
+     * damage, and they are not equally serious.
+     *
+     * A **break** is a link that resolved to something and would resolve to
+     * nothing. It is loud: Obsidian shows it unresolved and `vault_health`
+     * reports it.
+     *
+     * A **repoint** is a link that would resolve to a different file than it
+     * does today, with no text changed anywhere. This vault has both
+     * `Interacts/Peter Litzow.pdf` and `Interacts/Superseded/Peter Litzow.pdf`,
+     * so moving the first one deeper makes every `[[Peter Litzow]]` name the
+     * superseded copy instead. Nothing is broken, nothing looks wrong, and the
+     * vault now means something else. That is why a repoint is refused where a
+     * break is merely reported.
+     *
+     * A link that resolved to the moved file and follows it to its new path is
+     * neither: that is the file being moved, working. `keepSource` is what
+     * turns that case back into a repoint, because after a copy both paths
+     * exist and a link that now prefers the copy has genuinely changed meaning.
+     */
+    resolutionImpact(from: string, to: string, options: { keepSource?: boolean } = {}): ResolutionImpact {
+        const before = this.allPaths();
+        const after = new Set(options.keepSource ? before : before.filter((path) => path !== from));
+        after.add(to);
+
+        const impact: ResolutionImpact = { breaks: [], repoints: [] };
+        if (from === to) return impact;
+
+        // Only these two paths differ between the two vaults, so a link whose
+        // target could never match either of them cannot change, whatever else
+        // it points at. That is what keeps this from being a re-resolution of
+        // every link in the vault.
+        const targets = [...new Set([...candidateTargets(from), ...candidateTargets(to)])];
+        const placeholders = targets.map(() => "?").join(", ");
+        const rows = this.db
+            .prepare(
+                `SELECT DISTINCT source_path, target FROM links
+                 WHERE target <> ''
+                   AND (resolved_path = ? OR target COLLATE NOCASE IN (${placeholders}))
+                 ORDER BY source_path, target`
+            )
+            .all(from, ...(targets as never[])) as unknown as { source_path: string; target: string }[];
+
+        for (const row of rows) {
+            const was = resolveTarget(row.target, before);
+            const becomes = resolveTarget(row.target, after);
+            if (was === undefined || was === becomes) continue;
+
+            if (becomes === undefined) {
+                impact.breaks.push({ source: row.source_path, target: row.target });
+                continue;
+            }
+            // The moved file taking its own inbound links with it. Only a move
+            // gets this pass: after a copy the original is still there, and a
+            // link that has switched to the copy has been taken from it.
+            if (!options.keepSource && was === from && becomes === to) continue;
+
+            impact.repoints.push({ source: row.source_path, target: row.target, was, becomes });
+        }
+
+        return impact;
     }
 
     // --- Reading -----------------------------------------------------------

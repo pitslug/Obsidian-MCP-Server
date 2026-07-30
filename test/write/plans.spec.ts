@@ -453,3 +453,115 @@ describe("committing", () => {
         expect(await contentOf(stack.db, "old.md")).toBe("");
     }, 60_000);
 });
+
+describe("a relocation in a plan", () => {
+    /** What plan_move composes: the move, then one edit per linking note. */
+    async function moveWithRewrite(executor: PlanningWriteExecutor) {
+        const source = await executor.currentEntry("Meetings/Notes.md");
+        const linker = await executor.currentEntry("Hub.md");
+        return executor.plan([
+            {
+                kind: "move",
+                from: "Meetings/Notes.md",
+                to: "Meetings/Minutes.md",
+                content: text("the meeting"),
+                expectedRev: source?._rev ?? null,
+                summary: "renamed, so 1 link is rewritten",
+            },
+            {
+                kind: "write",
+                path: "Hub.md",
+                content: text("See [[Minutes]]."),
+                expectedRev: linker?._rev ?? null,
+                notable: true,
+                summary: "rewrites 1 link",
+            },
+        ]);
+    }
+
+    it("previews the move as one change, and writes nothing", async () => {
+        const stack = await stackFor(nextDb("plan-move"));
+        await put(stack.executor, "Meetings/Notes.md", text("the meeting"));
+        await put(stack.executor, "Hub.md", text("See [[Notes]]."));
+
+        stack.methods.length = 0;
+        const plan = await moveWithRewrite(stack.executor);
+
+        expect(stack.methods.every((method) => method === "GET")).toBe(true);
+        expect(plan.totals.moves).toBe(1);
+        const [move] = plan.changes;
+        expect(move?.effect).toBe("move");
+        expect(move?.from).toBe("Meetings/Notes.md");
+        expect(move?.path).toBe("Meetings/Minutes.md");
+        // A relocation destroys nothing, and is still the change the plan is
+        // about, so it must survive truncation whatever the tool said.
+        expect(move?.notable).toBe(true);
+    }, 60_000);
+
+    it("commits the move and the rewrites together", async () => {
+        const stack = await stackFor(nextDb("commit-move"));
+        await put(stack.executor, "Meetings/Notes.md", text("the meeting"));
+        await put(stack.executor, "Hub.md", text("See [[Notes]]."));
+
+        const plan = await moveWithRewrite(stack.executor);
+        const result = await stack.executor.commit(plan.id);
+
+        // Three receipts for two operations: the destination write, the source
+        // deletion, and the rewritten note.
+        expect(result.applied.map((receipt) => receipt.path)).toEqual([
+            "Meetings/Minutes.md",
+            "Meetings/Notes.md",
+            "Hub.md",
+        ]);
+        expect(await contentOf(stack.db, await stack.executor.idFor("Meetings/Minutes.md"))).toBe(
+            "the meeting"
+        );
+        expect(await contentOf(stack.db, await stack.executor.idFor("Hub.md"))).toBe("See [[Minutes]].");
+    }, 60_000);
+
+    it("refuses the whole plan when the file moved underneath it", async () => {
+        const stack = await stackFor(nextDb("stale-move"));
+        await put(stack.executor, "Meetings/Notes.md", text("the meeting"));
+        await put(stack.executor, "Hub.md", text("See [[Notes]]."));
+
+        const plan = await moveWithRewrite(stack.executor);
+        await put(stack.executor, "Meetings/Notes.md", text("edited on another device"));
+
+        await expect(stack.executor.commit(plan.id)).rejects.toThrow(PlanStaleError);
+        expect(await contentOf(stack.db, await stack.executor.idFor("Meetings/Minutes.md"))).toBe("");
+    }, 60_000);
+
+    it("refuses to plan a move of something that is not there", async () => {
+        const stack = await stackFor(nextDb("move-absent"));
+
+        await expect(
+            stack.executor.plan([
+                { kind: "move", from: "ghost.md", to: "archive/ghost.md", content: text("") },
+            ])
+        ).rejects.toThrow(/no note at/i);
+    }, 60_000);
+
+    it("refuses to plan a move onto an occupied path", async () => {
+        const stack = await stackFor(nextDb("move-occupied-plan"));
+        await put(stack.executor, "a.md", text("a"));
+        await put(stack.executor, "b.md", text("b"));
+
+        await expect(
+            stack.executor.plan([{ kind: "move", from: "a.md", to: "b.md", content: text("a") }])
+        ).rejects.toThrow(/already exists/);
+    }, 60_000);
+
+    it("refuses a plan that also edits either end of the move", async () => {
+        // Two operations on one note would have the second working from a
+        // revision the first has already replaced.
+        const stack = await stackFor(nextDb("move-duplicate"));
+        await put(stack.executor, "a.md", text("a"));
+
+        await expect(
+            stack.executor.plan([
+                { kind: "move", from: "a.md", to: "b.md", content: text("a") },
+                { kind: "write", path: "b.md", content: text("something else") },
+            ])
+        ).rejects.toThrow(DuplicatePlanTargetError);
+    }, 60_000);
+});

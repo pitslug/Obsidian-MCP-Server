@@ -20,6 +20,11 @@ import { CHUNK_ID_RANGE_END, PREFIX_CHUNK } from "../vault-model/constants.js";
 import { extractAttachment } from "../attachment/extract.js";
 import { isTranscriptStale, type TranscriptStore } from "../attachment/transcripts.js";
 
+/** How long to wait before the first attempt to put the feed back. */
+const FEED_RETRY_MS = 1_000;
+/** And the longest it will ever wait between attempts. */
+const FEED_RETRY_CAP_MS = 60_000;
+
 const FILE_RANGES: [string, string][] = [
     ["", "_"],
     ["_\u{10ffff}", PREFIX_CHUNK],
@@ -44,6 +49,12 @@ export interface IndexBuilderOptions {
 export class IndexBuilder {
     private following = false;
     private changes: { cancel(): void } | undefined;
+    /** Where to resume the feed from, which a reconnection depends on. */
+    private since: string | number = "now";
+    /** Set by stop(), so a reconnection in flight does not undo it. */
+    private stopped = false;
+    private backoffMs = 0;
+    private retry: ReturnType<typeof setTimeout> | undefined;
     /** Notes that failed to assemble during the last build. */
     private lastSkipped: string[] = [];
 
@@ -80,9 +91,7 @@ export class IndexBuilder {
             this.index.put(file, {
                 outcome: stale ? "transcribed-stale" : "transcribed",
                 text: transcript.text,
-                reason: stale
-                    ? "The attachment has changed since this transcription was made."
-                    : undefined,
+                reason: stale ? "The attachment has changed since this transcription was made." : undefined,
             });
             return;
         }
@@ -102,6 +111,25 @@ export class IndexBuilder {
             text: extracted.text,
             reason: extracted.reason,
         });
+    }
+
+    /**
+     * Index one file now, rather than when the changes feed gets to it.
+     *
+     * For the one case where waiting is not merely slower but wrong: a file
+     * that moves is written to its new path, which the feed picks up
+     * immediately, and only then does its transcription follow. The feed
+     * therefore indexes the destination while the transcription is still filed
+     * under the old path, finds nothing to index for it, and never looks again.
+     * A scan a model was paid to read would silently stop being findable.
+     */
+    async reindex(path: string): Promise<void> {
+        try {
+            await this.indexOne(path);
+            this.index.resolveLinks();
+        } catch (error) {
+            this.log.warn(`Index: could not update ${path} (${(error as Error).message})`);
+        }
     }
 
     /** Walk every file document and index it. */
@@ -160,21 +188,81 @@ export class IndexBuilder {
     /**
      * Follow the replica for changes.
      *
-     * `since: "now"` because a rebuild has just covered everything before this
-     * point; replaying from zero would index the whole vault twice.
+     * A rebuild has just covered everything up to this point, so this starts
+     * from where the replica is now rather than replaying the whole vault.
+     * The sequence is read explicitly rather than passed as `since: "now"`,
+     * because it is also what a reconnection resumes from, and "now" at that
+     * moment would mean "skip whatever happened while the feed was dead".
      */
-    follow(): void {
+    async follow(): Promise<void> {
         if (this.following) return;
         this.following = true;
+        this.stopped = false;
+
+        try {
+            const info = (await this.replicator.database.info()) as unknown as {
+                update_seq?: string | number;
+            };
+            this.since = info.update_seq ?? "now";
+        } catch {
+            // Not worth failing startup over. The cost is that a feed which
+            // dies before its first change resumes from "now" and misses that
+            // window, which is the same behaviour this had everywhere before.
+            this.since = "now";
+        }
+
+        this.subscribe();
+    }
+
+    /**
+     * Attach to the feed, and put it back when it falls off.
+     *
+     * The failure this exists for used to be silent and permanent: on any error
+     * the feed logged, set `following = false`, and stayed dead until the
+     * process restarted. Reads went on working, so nothing looked wrong, while
+     * every note written from then on was missing from search and every edit
+     * was answered from a frozen copy. A note the vault holds and the index has
+     * never heard of is invisible to search, to the tag and property
+     * inventories, and to anything that selects notes for a batch.
+     *
+     * Backoff doubles from a second to a minute, because the usual cause is the
+     * replica being briefly unavailable and the unusual cause is something that
+     * will not be fixed by trying hard. It resumes from the last sequence
+     * applied, so a change that arrived during the outage is picked up rather
+     * than skipped.
+     */
+    private subscribe(): void {
+        if (this.stopped) return;
 
         this.changes = this.replicator.database
-            .changes({ since: "now", live: true, include_docs: true, timeout: false })
+            .changes({ since: this.since, live: true, include_docs: true, timeout: false })
             .on("change", (change) => {
-                void this.applyChange(change as unknown as ChangeRow);
+                const row = change as unknown as ChangeRow;
+                if (row.seq !== undefined) this.since = row.seq as string | number;
+                // A change means the feed is healthy, whatever it took to get
+                // here, so the next failure starts from a short wait again.
+                this.backoffMs = 0;
+                void this.applyChange(row);
             })
             .on("error", (error: unknown) => {
-                this.log.error(`Index changes feed error: ${String(error)}`);
-                this.following = false;
+                this.changes = undefined;
+                if (this.stopped) return;
+
+                this.backoffMs =
+                    this.backoffMs === 0 ? FEED_RETRY_MS : Math.min(this.backoffMs * 2, FEED_RETRY_CAP_MS);
+                this.log.warn(
+                    `Index changes feed dropped (${String(error)}). Reconnecting in ` +
+                        `${Math.round(this.backoffMs / 1000)}s from sequence ${String(this.since)}. ` +
+                        `Until it is back, notes written or edited elsewhere will not appear in search.`
+                );
+
+                this.retry = setTimeout(() => {
+                    this.retry = undefined;
+                    this.subscribe();
+                }, this.backoffMs);
+                // A pending reconnection must not hold the process open: it is
+                // a cache catching up, not work anybody is waiting for.
+                this.retry.unref?.();
             }) as unknown as { cancel(): void };
     }
 
@@ -190,6 +278,13 @@ export class IndexBuilder {
 
         if (change.deleted || isDeleted(doc as { deleted?: boolean; _deleted?: boolean })) {
             this.index.remove(path);
+            // Resolution changes when a path disappears, and not only by
+            // breaking: a vault holding two files of the same name has the
+            // other one take over, which is what Obsidian does and what a move
+            // depends on, since the tombstone for the old path arrives after
+            // the new one is already indexed. Without this the links to a
+            // moved file stay unresolved until the next restart.
+            this.index.resolveLinks();
             this.log.debug(`Index: removed ${path}`);
             return;
         }
@@ -206,9 +301,17 @@ export class IndexBuilder {
     }
 
     stop(): void {
+        this.stopped = true;
+        if (this.retry) clearTimeout(this.retry);
+        this.retry = undefined;
         this.changes?.cancel();
         this.changes = undefined;
         this.following = false;
+    }
+
+    /** Whether the feed is attached right now. Used by vault_status. */
+    get feedAttached(): boolean {
+        return this.changes !== undefined;
     }
 
     /** Paths skipped by the last build, for the status tool. */
@@ -219,6 +322,7 @@ export class IndexBuilder {
 
 interface ChangeRow {
     id: string;
+    seq?: string | number;
     deleted?: boolean;
     doc?: unknown;
 }

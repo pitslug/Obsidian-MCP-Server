@@ -11,10 +11,12 @@
  *
  * It proves that every write path composes documents CouchDB accepts and this
  * code reads back correctly: create, edit, insert under a heading, set
- * properties across several notes, plan and commit, soft delete, undelete. It
- * proves chunk reuse does not orphan a chunk, and that the plan protocol
- * refuses both a stale plan and content composed from a read that went stale
- * while the plan was being made.
+ * properties across several notes, plan and commit, soft delete, undelete,
+ * restore from a tombstone, move, copy, and a rename committed together with
+ * the link rewrites it needs. It proves chunk reuse does not orphan a chunk,
+ * that a move sends no chunks at all, and that the plan protocol refuses both a
+ * stale plan and content composed from a read that went stale while the plan
+ * was being made.
  *
  * It also reports, read-only, what `append_daily` would infer as this vault's
  * daily note template. That is worth looking at even when every check passes:
@@ -79,12 +81,15 @@ import {
     type VaultFormatSettings,
 } from "../src/vault-model/index.js";
 import { Replicator } from "../src/replicator/index.js";
+import { VaultReader } from "../src/vault/reader.js";
 import { CouchWriter } from "../src/write/couch.js";
 import { PlanningWriteExecutor } from "../src/write/plans.js";
 import { PlanStaleError } from "../src/write/plans.js";
 import { renderPlan } from "../src/write/render.js";
 import { assertScratchDatabase } from "../src/write/scratch.js";
+import { DestinationExistsError } from "../src/write/executor.js";
 import { appendUnderHeading } from "../src/note/sections.js";
+import { rewriteLinkTargets } from "../src/note/links.js";
 import { editFrontmatter } from "../src/note/frontmatter.js";
 import { civilDateIn, fillTemplate, hostTimeZone, inferDailyFormat } from "../src/note/daily.js";
 import { endpointFor, databaseUrl, documentUrl, headersFor } from "../src/couch/rest.js";
@@ -458,6 +463,15 @@ async function main() {
         onWarning: (message) => console.log(warn(message)),
     });
 
+    // For the one check that has to read a note the vault says is not there.
+    // Given the same GET-only client the checks use, so a tombstone is read
+    // from CouchDB rather than from the replica.
+    const reader = new VaultReader({
+        replicator,
+        settings,
+        fetchRemote: (id) => verifier.raw(id),
+    });
+
     const created: string[] = [];
 
     try {
@@ -624,6 +638,59 @@ async function main() {
         );
         expectFinal(`"${secondPath}" is back, saying "Written over a tombstone."`);
 
+        // --- Restoring from the tombstone itself ------------------------------
+        //
+        // The claim `restore_note` rests on: a soft delete keeps the document
+        // and its chunk list, so the text is usually still assemblable from the
+        // deletion record. Usually and not always, which is why it is worth
+        // checking against a real database rather than a fixture: the plugin's
+        // orphan cleanup is entitled to collect a tombstone's chunks, and no
+        // test with its own in-memory CouchDB can tell you whether it has.
+
+        console.log(heading("Restoring a deleted note"));
+        const restorePath = `${FOLDER}/deleted-then-restored.md`;
+        const restoreBody =
+            `# Deleted on purpose\n\n` +
+            Array.from({ length: 60 }, (_unused, i) => `Line ${i}, so this spans several chunks.`).join(
+                "\n"
+            ) +
+            `\n`;
+
+        const restoreCreate = await executor.write({
+            path: restorePath,
+            content: text(restoreBody),
+            expectedRev: null,
+        });
+        created.push(restorePath);
+        await executor.remove({ path: restorePath, expectedRev: restoreCreate.rev });
+
+        const recovered = await reader.readDeleted(restorePath);
+        check(
+            recovered !== undefined && recovered.file.kind === "text" && recovered.file.text === restoreBody,
+            "A deleted note still assembles, out of its own deletion record",
+            "The tombstone's chunks are gone or wrong, so nothing could restore this note."
+        );
+
+        if (recovered) {
+            const restored = await executor.write({
+                path: restorePath,
+                content: text(restoreBody),
+                expectedRev: recovered.rev,
+                ctime: recovered.file.ctime,
+            });
+            check(
+                (await verifier.text(restored.id, ctx)) === restoreBody,
+                "Restoring it writes back exactly what was deleted"
+            );
+            check(
+                (await verifier.raw(restored.id))?.ctime === (await verifier.raw(restoreCreate.id))?.ctime,
+                "The restored note keeps the creation time it always had",
+                "A restored note that dates from its restoration is a different note."
+            );
+        }
+        expectFinal(`"${restorePath}" exists, having been deleted and brought back.`);
+        expectAlong(`"${restorePath}" appeared, vanished, and came back with the same text.`);
+
         // --- Appending under a heading ---------------------------------------
         //
         // Every edit above appended at the end of a note. This one inserts in
@@ -782,6 +849,182 @@ async function main() {
             ),
             "The other device's write survived",
             "The plan overwrote a change it never saw, which is the failure this check exists for."
+        );
+
+        // --- Moving, renaming and copying -------------------------------------
+        //
+        // New write behaviour, so it belongs in the gate. The part worth
+        // proving against a real database is not that the destination appears.
+        // It is that the destination is written before the source is removed,
+        // so no interruption can leave a hole, and that the chunks are not
+        // re-sent, which is the difference between moving a 4 MiB scan and
+        // uploading one.
+
+        console.log(heading("Moving a file"));
+        const movingFrom = `${FOLDER}/to-move.md`;
+        const movingTo = `${FOLDER}/moved/to-move.md`;
+        const movingBody =
+            `# Moving\n\n` +
+            Array.from({ length: 80 }, (_unused, i) => `Line ${i}, here to make this worth chunking.`).join(
+                "\n"
+            ) +
+            `\n`;
+
+        const beforeMove = await executor.write({
+            path: movingFrom,
+            content: text(movingBody),
+            expectedRev: null,
+        });
+        created.push(movingFrom);
+        const movedCtime = (await verifier.raw(beforeMove.id))?.ctime;
+
+        const moveReceipt = await executor.relocate({
+            from: movingFrom,
+            to: movingTo,
+            content: text(movingBody),
+            expectedRev: beforeMove.rev,
+        });
+        created.push(movingTo);
+
+        check(
+            (await verifier.text(moveReceipt.written.id, ctx)) === movingBody,
+            `Moved to "${movingTo}", byte-identical`,
+            "The destination does not reassemble to what was sent."
+        );
+        check(
+            moveReceipt.written.chunksWritten === 0 && moveReceipt.written.chunksReused > 0,
+            `Sent no chunks: reused all ${moveReceipt.written.chunksReused} of them`,
+            "The move re-sent chunks CouchDB already held, which for an attachment is the whole file."
+        );
+        check(
+            moveReceipt.removed?.deleted === true,
+            "The old path is a tombstone, so every device removes its copy",
+            "The source was not removed, which leaves the file at both paths."
+        );
+        check(
+            (await verifier.raw(moveReceipt.written.id))?.ctime === movedCtime,
+            "The creation time came across",
+            "The moved file records the move as its creation, so it sorts as newly written."
+        );
+        expectFinal(`"${movingTo}" exists, and nothing is left at "${FOLDER}/to-move.md".`);
+
+        console.log(heading("Refusing a move onto something"));
+        const occupiedRefusal = await executor
+            .relocate({
+                from: movingTo,
+                to: notePath,
+                content: text(movingBody),
+                expectedRev: moveReceipt.written.rev,
+            })
+            .then(() => undefined)
+            .catch((error: Error) => error);
+
+        check(
+            occupiedRefusal instanceof DestinationExistsError,
+            "Refuses to move a file onto one that already exists"
+        );
+        check(
+            ((await verifier.text(await executor.idFor(notePath), ctx)) as string).includes(
+                "Appended by the second write."
+            ),
+            "The file that was in the way is untouched",
+            "The refusal came after the destination had already been written over."
+        );
+
+        console.log(heading("Copying a file"));
+        const copyTo = `${FOLDER}/moved/a-copy.md`;
+        const copyReceipt = await executor.relocate({
+            from: movingTo,
+            to: copyTo,
+            content: text(movingBody),
+            expectedRev: moveReceipt.written.rev,
+            keepSource: true,
+        });
+        created.push(copyTo);
+
+        check(
+            copyReceipt.removed === undefined &&
+                (await verifier.text(copyReceipt.written.id, ctx)) === movingBody &&
+                (await verifier.text(moveReceipt.written.id, ctx)) === movingBody,
+            "A copy leaves the original where it is, and both read back",
+            "One of the two paths is missing or wrong after a copy."
+        );
+        expectFinal(`"${copyTo}" holds the same text as "${movingTo}".`);
+
+        // --- A rename, with the links rewritten -------------------------------
+        //
+        // The case move_file refuses, because a rename breaks every basename
+        // link pointing at the file. Composed here the way plan_move composes
+        // it: the relocation plus one edit per linking note, in one plan
+        // committed as a unit.
+
+        console.log(heading("Renaming, and rewriting the links"));
+        const renameFrom = `${FOLDER}/linked.md`;
+        const renameTo = `${FOLDER}/renamed.md`;
+        const linkerPath = `${FOLDER}/linker.md`;
+        const linkerBody = `See [[linked]], and ![[linked#Detail]] too.\n`;
+        const linkedBody = `# Linked\n\n## Detail\n\nSomething.\n`;
+
+        const linkedWrite = await executor.write({
+            path: renameFrom,
+            content: text(linkedBody),
+            expectedRev: null,
+        });
+        const linkerWrite = await executor.write({
+            path: linkerPath,
+            content: text(linkerBody),
+            expectedRev: null,
+        });
+        created.push(renameFrom, renameTo, linkerPath);
+
+        const rewritten = rewriteLinkTargets(linkerBody, {
+            from: renameFrom,
+            to: renameTo,
+            targets: ["linked"],
+            paths: [renameTo, linkerPath],
+        });
+
+        const renamePlan = await executor.plan([
+            {
+                kind: "move",
+                from: renameFrom,
+                to: renameTo,
+                content: text(linkedBody),
+                expectedRev: linkedWrite.rev,
+            },
+            {
+                kind: "write",
+                path: linkerPath,
+                content: text(rewritten.text),
+                expectedRev: linkerWrite.rev,
+                notable: true,
+                summary: `rewrites ${rewritten.changed} link(s)`,
+            },
+        ]);
+
+        console.log(info("The plan, as plan_move would return it:\n"));
+        console.log(renderPlan(renamePlan));
+        console.log("");
+
+        await executor.commit(renamePlan.id);
+
+        check(
+            (await verifier.text(await executor.idFor(renameTo), ctx)) === linkedBody,
+            `Renamed "${renameFrom}" to "${renameTo}" as one operation in the plan`
+        );
+        check(
+            (await verifier.raw(await executor.idFor(renameFrom)))?.deleted === true,
+            "The old path is a tombstone rather than a document that never existed",
+            "A rename that hard-deletes the source leaves an offline device able to push it back."
+        );
+        check(
+            (await verifier.text(await executor.idFor(linkerPath), ctx)) ===
+                `See [[renamed]], and ![[renamed#Detail]] too.\n`,
+            "Both links were rewritten, keeping the embed marker and the subpath",
+            "A rewrite that drops an embed or a heading reference has changed what the note says."
+        );
+        expectFinal(
+            `"${linkerPath}" links to [[renamed]] twice, the second an embed of its "Detail" heading.`
         );
 
         // --- Where daily notes would go ---------------------------------------
