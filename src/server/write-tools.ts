@@ -187,8 +187,21 @@ function describeDeletion(receipt: WriteReceipt): string {
     );
 }
 
-export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void {
-    server.addTool({
+export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): string[] {
+    // Names collected as the tools are registered, and returned, so that
+    // anything wanting to say which tools can change the vault reads them from
+    // the registrations rather than from a second list written by hand. There
+    // was such a list, in the startup warning, and it was missing delete_note
+    // for a day: the log said six tools when there were seven, which is the
+    // worst kind of wrong for a warning whose whole job is to tell an operator
+    // what has been let through the door.
+    const registered: string[] = [];
+    const addTool: typeof server.addTool = (tool) => {
+        registered.push(tool.name);
+        server.addTool(tool);
+    };
+
+    addTool({
         name: "create_note",
         description:
             "Create a new note in the Obsidian vault at a given path, with optional frontmatter " +
@@ -232,7 +245,7 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
             }),
     });
 
-    server.addTool({
+    addTool({
         name: "append_note",
         description:
             "Append text to a note in the Obsidian vault, creating the note if it does not exist. " +
@@ -276,7 +289,7 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
             }),
     });
 
-    server.addTool({
+    addTool({
         name: "append_daily",
         description:
             "Append text to today's daily note in the Obsidian vault, creating the note if today " +
@@ -331,7 +344,7 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
             }),
     });
 
-    server.addTool({
+    addTool({
         name: "edit_note",
         description:
             "Replace an exact piece of text in a note in the Obsidian vault. Use this for a " +
@@ -383,7 +396,7 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
             }),
     });
 
-    server.addTool({
+    addTool({
         name: "set_properties",
         description:
             "Add, change or remove frontmatter properties on a note in the Obsidian vault, " +
@@ -433,7 +446,7 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
             }),
     });
 
-    server.addTool({
+    addTool({
         name: "delete_note",
         description:
             "Delete a note from the Obsidian vault. Use this for a note that should not exist: " +
@@ -475,6 +488,8 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): void
                 return describeDeletion(receipt);
             }),
     });
+
+    return registered;
 }
 
 /**

@@ -206,6 +206,10 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         roots: { enabled: false },
     });
 
+    // Filled by the write registrations below, and read at call time by
+    // vault_status. One list, two readers, no sentence restating it.
+    const writableTools: string[] = [];
+
     const toolContext = {
         replicator,
         reader,
@@ -214,6 +218,7 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         readOnly: config.readOnly,
         attachmentSizeCap: config.attachmentSizeCap,
         transcripts,
+        writableTools: () => writableTools,
     };
     registerTools(server, toolContext);
     registerAttachmentTool(server, toolContext);
@@ -240,18 +245,25 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     });
 
     if (!config.readOnly) {
-        registerWriteTools(server, {
-            reader,
-            executor,
-            index,
-            dailyNotePath: config.dailyNotePath,
-            timeZone: config.timeZone,
-        });
-        registerPlanTools(server, { reader, index, executor });
+        writableTools.push(
+            ...registerWriteTools(server, {
+                reader,
+                executor,
+                index,
+                dailyNotePath: config.dailyNotePath,
+                timeZone: config.timeZone,
+            }),
+            ...registerPlanTools(server, { reader, index, executor })
+        );
+        // Named from the registrations, never from a list written here. The
+        // previous version of this line said "Six tools" and listed them, and
+        // stayed that way through the arrival of a seventh: a warning that
+        // undercounts what can change the vault is worse than no warning, since
+        // it will be believed. It is also what someone reads to decide whether
+        // the deployment is what they think it is.
         log.warn(
-            `Writes are ENABLED against ${redactedUrl(config.couch)}. ` +
-                `Six tools can modify this vault directly: create_note, append_note, append_daily, ` +
-                `edit_note, set_properties and commit_plan. Batch property changes go through ` +
+            `Writes are ENABLED against ${redactedUrl(config.couch)}. These tools can modify this ` +
+                `vault directly: ${writableTools.join(", ")}. Batch property changes go through ` +
                 `plan_set_properties first and write nothing until a plan is committed.`
         );
         log.info(

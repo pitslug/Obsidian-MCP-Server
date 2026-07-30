@@ -40,7 +40,7 @@
  */
 
 import { z } from "zod";
-import type { FastMCP } from "fastmcp";
+import type { FastMCP, FastMCPSessionAuth, Tool, ToolParameters } from "fastmcp";
 import type { VaultIndex, IndexedNote } from "../index/index.js";
 import type { VaultReader } from "../vault/reader.js";
 import { NoteNotFoundError } from "../vault/reader.js";
@@ -194,8 +194,21 @@ async function reporting(work: () => Promise<string>): Promise<string> {
     }
 }
 
-export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): void {
-    server.addTool({
+export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string[] {
+    // Returned for the same reason as in write-tools.ts: nothing outside this
+    // file should be keeping its own list of which tools can change the vault.
+    // Only one of these three can, which is the point of the protocol and is
+    // recorded here, next to the tool, rather than in a sentence elsewhere.
+    const mutating: string[] = [];
+    const addTool = <Params extends ToolParameters>(
+        tool: Tool<FastMCPSessionAuth, Params>,
+        options: { mutates?: boolean } = {}
+    ) => {
+        if (options.mutates) mutating.push(tool.name);
+        server.addTool(tool);
+    };
+
+    addTool({
         name: "plan_set_properties",
         description:
             "Work out what setting frontmatter properties across a set of notes would do, and " +
@@ -295,37 +308,40 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): void {
             }),
     });
 
-    server.addTool({
-        name: "commit_plan",
-        description:
-            "Apply a plan made by plan_set_properties, by its ID. Refuses in full, writing nothing, " +
-            "if any of the notes changed since the plan was made. Only call this after the plan has " +
-            "been shown to the person who asked for it and they have agreed to it.",
-        parameters: z.object({
-            plan_id: z.string().min(1).describe("The ID printed at the end of the plan."),
-        }),
-        execute: async ({ plan_id }, { session }) =>
-            reporting(async () => {
-                requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
-                const result = await ctx.executor.commit(plan_id);
-                if (result.applied.length === 0) {
-                    return `Plan ${plan_id} committed, and every note in it already said exactly that. Nothing was written.`;
-                }
-                const bytes = result.applied.reduce((sum, receipt) => sum + receipt.size, 0);
-                const paths = result.applied.slice(0, 10).map((receipt) => `  ${receipt.path}`);
-                const more =
-                    result.applied.length > paths.length
-                        ? [`  and ${result.applied.length - paths.length} more`]
-                        : [];
-                return [
-                    `Committed plan ${plan_id}: ${result.applied.length} note(s) written, ${bytes.toLocaleString()} bytes.`,
-                    ...paths,
-                    ...more,
-                ].join("\n");
+    addTool(
+        {
+            name: "commit_plan",
+            description:
+                "Apply a plan made by plan_set_properties, by its ID. Refuses in full, writing nothing, " +
+                "if any of the notes changed since the plan was made. Only call this after the plan has " +
+                "been shown to the person who asked for it and they have agreed to it.",
+            parameters: z.object({
+                plan_id: z.string().min(1).describe("The ID printed at the end of the plan."),
             }),
-    });
+            execute: async ({ plan_id }, { session }) =>
+                reporting(async () => {
+                    requireScope(session as SessionAuth | undefined, SCOPE_WRITE);
+                    const result = await ctx.executor.commit(plan_id);
+                    if (result.applied.length === 0) {
+                        return `Plan ${plan_id} committed, and every note in it already said exactly that. Nothing was written.`;
+                    }
+                    const bytes = result.applied.reduce((sum, receipt) => sum + receipt.size, 0);
+                    const paths = result.applied.slice(0, 10).map((receipt) => `  ${receipt.path}`);
+                    const more =
+                        result.applied.length > paths.length
+                            ? [`  and ${result.applied.length - paths.length} more`]
+                            : [];
+                    return [
+                        `Committed plan ${plan_id}: ${result.applied.length} note(s) written, ${bytes.toLocaleString()} bytes.`,
+                        ...paths,
+                        ...more,
+                    ].join("\n");
+                }),
+        },
+        { mutates: true }
+    );
 
-    server.addTool({
+    addTool({
         name: "discard_plan",
         description:
             "Throw away a plan without applying it. Plans expire on their own, so this is a " +
@@ -336,6 +352,8 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): void {
                 ? `Plan ${plan_id} discarded. Nothing was written.`
                 : `There is no plan with ID "${plan_id}". It may have expired or already been committed.`,
     });
+
+    return mutating;
 }
 
 /**

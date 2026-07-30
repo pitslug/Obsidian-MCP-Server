@@ -39,6 +39,25 @@ const TRANSFORM = transformContextFor(SETTINGS, undefined);
 let couch: FakeCouch;
 let replicaDir: string;
 let client: Client;
+/** Everything the server wrote to stderr, for the tests that read its log. */
+let stderr = "";
+
+/**
+ * Every tool that can change the vault.
+ *
+ * Written out here on purpose. This is the assertion, not a mirror of the
+ * source: the server derives its own list from the registrations, and the point
+ * of stating it independently is to notice when the two disagree.
+ */
+const MUTATING_TOOLS = [
+    "create_note",
+    "append_note",
+    "append_daily",
+    "edit_note",
+    "set_properties",
+    "delete_note",
+    "commit_plan",
+];
 
 function textOf(result: unknown): string {
     return ((result as { content?: { type: string; text?: string }[] }).content ?? [])
@@ -185,13 +204,22 @@ beforeAll(async () => {
             REPLICA_PATH: join(replicaDir, "replica"),
             INDEX_PATH: join(replicaDir, "index.sqlite"),
             TRANSCRIPT_PATH: join(replicaDir, "transcripts.sqlite"),
-            LOG_LEVEL: "error",
+            // Not "error": the startup warning naming what can change the vault
+            // is logged at warn, and one of the tests below reads it.
+            LOG_LEVEL: "warn",
         },
         stderr: "pipe",
     });
 
     client = new Client({ name: "test", version: "1" }, { capabilities: {} });
     await client.connect(transport);
+
+    // Attached after connect, which is after the warning was emitted. Node
+    // holds unread pipe output rather than discarding it, so the first listener
+    // still receives everything written before it existed.
+    transport.stderr?.on("data", (chunk: Buffer | string) => {
+        stderr += String(chunk);
+    });
 }, 180_000);
 
 afterAll(async () => {
@@ -205,26 +233,31 @@ describe("the write surface", () => {
         const { tools } = await client.listTools();
         const names = tools.map((t) => t.name);
 
-        for (const name of [
-            "create_note",
-            "append_note",
-            "append_daily",
-            "edit_note",
-            "set_properties",
-            "delete_note",
-            "plan_set_properties",
-            "commit_plan",
-            "discard_plan",
-        ]) {
+        for (const name of [...MUTATING_TOOLS, "plan_set_properties", "discard_plan"]) {
             expect(names).toContain(name);
         }
     });
 
-    it("says so in vault_status", async () => {
+    it("names every one of them in vault_status", async () => {
         const out = await call("vault_status", {});
+
         expect(out).toContain("Writes: enabled");
-        expect(out).toContain("create_note");
-        expect(out).toContain("delete_note");
+        for (const name of MUTATING_TOOLS) expect(out).toContain(name);
+
+        // The two that cannot write should not be listed as though they could.
+        expect(out).not.toContain("discard_plan");
+    });
+
+    it("names every one of them in the startup warning too", async () => {
+        // Both this and vault_status read one list built by the registrations.
+        // They were two lists written by hand, and the warning spent a day
+        // omitting delete_note: it said six tools when there were seven, in the
+        // one line an operator reads to see what has been let through the door.
+        await until(async () => stderr.includes("Writes are ENABLED"));
+        const warning = stderr.split("\n").find((line) => line.includes("Writes are ENABLED")) ?? "";
+
+        for (const name of MUTATING_TOOLS) expect(warning).toContain(name);
+        expect(warning).not.toContain("discard_plan");
     });
 });
 

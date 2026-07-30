@@ -18,7 +18,7 @@ work.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 614 tests, ~85s
+npm test          # 615 tests, ~85s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -44,7 +44,7 @@ environment, or from Docker secrets in deployment. This repo is public.
 | Acceptance gate  | Met. Step three re-run end to end against `obsidian-writetest` on 29 July 2026, and confirmed in Obsidian         |
 | Transport        | stdio and streamable HTTP                                                                                        |
 | Vault contents   | 12 text notes, 15 attachments. Deliberately nearly empty until the OneNote migration starts                      |
-| Deployment       | Live on the Slugworx stack since 29 July 2026, pinned to `:0.1`, `READ_ONLY=true`                                 |
+| Deployment       | Live on the Slugworx stack since 29 July 2026, pinned to `:0.1`. `READ_ONLY=false` since 30 July, scope-gated     |
 | OAuth 2.1        | Exercised live: Claude connects through Pocket-ID holding `vault:read`, and the audience check was confirmed     |
 
 Thirteen read tools: `vault_status`, `list_notes`, `read_note`, `search_notes`,
@@ -245,9 +245,11 @@ Four switches stand between the container and the vault, and `deploy/README.md`
 has the detail. Switch one is done and is meant to be lived with.
 
 - [x] `READ_ONLY=true`, client granted only `vault:read`.
-- [ ] `READ_ONLY=false`, client still only `vault:read`. Every write tool should
-      appear and refuse by name. **The only step that tests a control rather
-      than exercising a path that was already open.** Costs one reconnect.
+- [x] `READ_ONLY=false`, client still only `vault:read`. **Passed 30 July 2026.**
+      The write tools appeared after a reconnect, and a `create_note` call was
+      refused for want of `vault:write` rather than succeeding. That is the scope
+      gate observed rather than assumed, which was the whole point of the step.
+      Nothing has been written to `obsidiandb` by this server.
 - [ ] Grant `vault:write` in Pocket-ID, with `COUCHDB_DATABASE` pointed at
       `obsidian-writetest`.
 - [ ] Point `COUCHDB_DATABASE` at `obsidiandb`.
@@ -427,6 +429,22 @@ server with `READ_ONLY=false`.
   copy of the note, and pull replication never repairs it because `_revs_diff`
   reports nothing missing. Reads keep returning the right winner, which is what
   makes it easy to miss. `withAncestry` in `src/write/executor.ts` supplies it.
+- **The same fact written in two places will disagree, and the copy nobody
+  tests is the one that lies.** The tools that can change the vault were named in
+  a sentence in `vault_status` and in another in the startup warning.
+  `delete_note` was added to the first and missed in the second, so for a day the
+  log greeting an operator said "Six tools can modify this vault directly" and
+  listed six of the seven. It was believed, reasonably, because a warning that
+  specific reads as authoritative. Both now read one list that the registrations
+  themselves build, and the sentence carries no count at all, since a count is
+  another copy of the same fact. Tests assert both against an independently
+  written list, which is what a test is for.
+- **A structural test can stop testing anything without failing.** The scope
+  check test in `test/write/surface.spec.ts` finds tool registrations by
+  splitting the source on `server.addTool({`. Wrapping that call to collect the
+  tool names, an hour later, would have left it splitting on a string that no
+  longer occurred: zero blocks, nothing to check, green. Any test that discovers
+  its own subjects needs a floor on how many it found.
 - **The index is a cache, and its failure mode is not lag but persistence.** It
   can hold a note the vault does not, which no amount of correctness in the
   delete path prevents: the feed that would tell it can die, and does so with a

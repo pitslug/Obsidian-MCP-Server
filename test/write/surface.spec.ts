@@ -75,9 +75,20 @@ describe("the write surface", () => {
         // something. A tool added here without it should fail this test rather
         // than pass review.
         const source = read("src/server/write-tools.ts");
-        const unchecked = source
-            .split("server.addTool({")
-            .slice(1)
+        const blocks = source.split("addTool({").slice(1);
+
+        // A floor, because the split above is a text match on a call this file
+        // does not own. Renaming or wrapping the registration helper would
+        // otherwise leave this finding nothing and passing while testing
+        // nothing, which is the failure mode a structural test has to guard
+        // against first. It happened: the helper was wrapped an hour after this
+        // test was written.
+        expect(
+            blocks.length,
+            "found no tool registrations, so this test proves nothing"
+        ).toBeGreaterThanOrEqual(6);
+
+        const unchecked = blocks
             .filter(
                 (block) => !block.includes("requireScope(session as SessionAuth | undefined, SCOPE_WRITE)")
             )

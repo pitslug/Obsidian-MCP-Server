@@ -32,6 +32,17 @@ export interface ToolContext {
     readOnly: boolean;
     attachmentSizeCap: number;
     transcripts: TranscriptStore;
+    /**
+     * The tools that can change the vault, as reported by their own
+     * registration.
+     *
+     * A function rather than an array because the read tools are registered
+     * before the write tools exist, and `vault_status` is answered long after
+     * both. Naming them is worth doing and worth not doing twice: the same list
+     * fills the startup warning, and when it was written out by hand in both
+     * places one of them went a day without `delete_note` in it.
+     */
+    writableTools: () => readonly string[];
 }
 
 /** Human-readable lag, since a raw millisecond count invites false precision. */
@@ -67,7 +78,7 @@ export function registerTools(server: FastMCP, ctx: ToolContext): void {
                 `Writes: ${
                     ctx.readOnly
                         ? "disabled (read-only), so no registered tool can modify the vault"
-                        : "enabled (create_note, append_note, edit_note, set_properties, delete_note)"
+                        : `enabled (${ctx.writableTools().join(", ")})`
                 }`,
                 `Encryption: ${ctx.settings.encrypt ? "on" : "off"}` +
                     (ctx.settings.usePathObfuscation ? ", path obfuscation on" : ""),
