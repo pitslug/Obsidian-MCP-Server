@@ -45,7 +45,7 @@ import type { VaultIndex, IndexedNote } from "../index/index.js";
 import type { VaultReader } from "../vault/reader.js";
 import { NoteNotFoundError } from "../vault/reader.js";
 import { editFrontmatter, FrontmatterUnreadableError } from "../note/frontmatter.js";
-import { rewriteLinkTargets } from "../note/links.js";
+import { renderWikilink, rewriteLinkTargets } from "../note/links.js";
 import { parseNote } from "../note/parse.js";
 import { isUnder, retagProperty, rewriteInlineTag } from "../note/tags.js";
 import { renderPlan } from "../write/render.js";
@@ -578,7 +578,7 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string
                                   .slice(0, 10)
                                   .map(
                                       (repoint) =>
-                                          `  ${repoint.source}: [[${repoint.target}]] means ` +
+                                          `  ${repoint.source}: ${renderWikilink(repoint)} means ` +
                                           `${repoint.was} and would mean ${repoint.becomes}`
                                   ),
                           ]

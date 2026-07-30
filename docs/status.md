@@ -19,7 +19,7 @@ work.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 749 tests, ~90s
+npm test          # 764 tests, ~90s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -183,8 +183,7 @@ at any time.
 
 Answering a hypothetical meant writing the resolution rule a second time, in
 code, since no table holds the answer for a vault that has not been written to
-yet. The copies are checked against each other in `test/index/resolve.spec.ts`
-rather than trusted, because a mirror nobody checks is a fork.
+yet. That second copy is gone again: see "Where a link points" below.
 
 Three things follow from a path being a document ID here, and each one is
 somewhere it can be enforced rather than remembered:
@@ -210,6 +209,44 @@ Renaming nothing about `[[Peter Litzow.pdf]]` while moving that file under
 `Superseded/` produces the identical link, now resolving to the other copy, so
 every rewrite is checked against the vault as it will be and falls back to the
 full path when the short form no longer lands on the right file.
+
+### Where a link points
+
+Rewritten 31 July 2026, and the reason it was worth doing separately is that the
+bug and the fix were different sizes. The bug: `[[Peter Litzow]]` found nothing
+when the vault held `Interacts/Peter Litzow.pdf`, because both copies of the rule
+only ever appended `.md`. Obsidian opens that PDF without hesitating, so
+`vault_health` was calling a working link broken, and worse, `resolutionImpact`
+could not see the link at all, which meant moving that PDF reported nothing
+affected and then broke something. A vault of PDFs named after people is exactly
+the shape that invites a link written without the extension.
+
+The fix could have been two more SQL passes. Instead the rule now lives once, in
+`src/index/resolve.ts`, and the four `UPDATE` passes in `resolveLinks` are gone:
+it builds a `LinkResolver` over the vault's paths and sweeps the link table in
+JavaScript, which is what `resolutionImpact` was already doing to answer its
+hypothetical. Three passes, most specific first. A file one of whose names is
+exactly the target; then a note one of whose names with `.md` off is the target;
+then any other file with its own extension off. A "name" here is the whole path
+or any tail of it beginning at a folder boundary, which is what makes
+`[[Attachments/Deck.pptx]]` and `[[Deck.pptx]]` both find
+`Meetings/RLT/Attachments/Deck.pptx`. Ties go to a match that reproduces the
+file's own capitalisation, then to the shortest path, then alphabetically, so
+asking twice gives the same answer.
+
+Two things fell out of there being one copy rather than two. The SQL was
+case-sensitive in two passes and insensitive in the other two, because `=` and
+`LIKE` differ in SQLite; that asymmetry had been written down here as a wart to
+leave alone, and in code it was a one-line decision rather than a schema
+question. Obsidian is case-insensitive, so this is now too. And
+`test/index/resolve.spec.ts` stopped being a parity check between two
+implementations and became a table of targets and the paths they should reach,
+which is the question anybody actually has.
+
+`candidateTargets` is the inverse of the same passes, and it is what keeps a move
+from re-resolving every link in the vault: a link whose target is not one of the
+names of the old path or the new one cannot change meaning. It strips any
+extension now rather than only `.md`, which is the half that had been missing.
 
 ### Tagging
 
@@ -369,7 +406,12 @@ revision back out of CouchDB after a transcription is saved.
     own descriptions. It covered what the script deliberately does not, which is
     the wording. Every operation behaved, and three messages turned out to
     describe the server as it was rather than as it is. See
-    `docs/acceptance-connector-2026-07-30.md`; all three are fixed.
+    `docs/acceptance-connector-2026-07-30.md`. Re-checked through the connector
+    on 31 July 2026, which found the `delete_note` wording and the `append_note`
+    separator fixed and `move_file`'s refusal counting correctly while still
+    printing every link in a reconstructed form, so an embed lost its marker and
+    its subpath. That is fixed too, and the renderer is now one function.
+    See `docs/recheck-connector-2026-07-31.md`.
 
     Re-run again on 30 July 2026 for the move path, and confirmed in Obsidian:
     a move that sent no chunks at all, a refusal to move onto an occupied path
@@ -422,14 +464,13 @@ machines. Rough priority order within each group.
       copy of their notes.
 - [ ] Run the same task through both servers side by side once, rather than
       comparing tool lists. The gaps above came from the registered tool names.
-- [ ] **An extensionless link to something that is not a note does not
-      resolve.** Obsidian opens the PDF for `[[Peter Litzow]]` when nothing else
-      carries that name; both copies of the resolution rule here only ever
-      append `.md`, so the link reads as broken. Written down rather than fixed
-      on 30 July 2026, because changing what an existing link means is not a
-      thing to do inside a change about moving files, and `vault_health` at
-      least reports it. `test/index/resolve.spec.ts` pins the current behaviour,
-      so fixing it will fail that test rather than surprise anyone.
+- [x] **An extensionless link to something that is not a note does not
+      resolve.** Fixed 31 July 2026. Written down rather than fixed the day
+      before, because changing what an existing link means is not a thing to do
+      inside a change about moving files. Doing it properly meant deleting the
+      second copy of the rule rather than adding two more passes to each copy,
+      which took the SQL/JS case-sensitivity asymmetry with it. See "Where a
+      link points" above.
 
 ### Finishing the deployment
 
@@ -469,10 +510,11 @@ has the detail. Switch one is done and is meant to be lived with.
       `vault_status` says whether it is attached. See "The index feed" above.
 - [ ] `get_attachment` refuses an attachment over `ATTACHMENT_SIZE_CAP` but will
       still serve a stored transcription for it. Untested; add one.
-- [ ] Set `DAILY_NOTE_PATH` on the writetest environment. That database holds one
-      dated filename and inference needs two, so `append_daily` is the only tool
-      on the write surface that cannot be exercised there, which makes it the one
-      thing first exercised against `obsidiandb`.
+- [x] Set `DAILY_NOTE_PATH` on the writetest environment. Done 31 July 2026, to
+      `Daily/YYYY-MM-DD.md`, which is also the convention the vault is adopting.
+      `append_daily` says the template came from the variable rather than from
+      inference, which is the distinction that matters when inference is what
+      failed there.
 - [ ] A path with literal quote characters, `"mcp-write-check/from-a-client.md"`,
       is sitting in the vault, sorting above everything else. Harmless where it
       is. Worth following up only because a document ID here is a vault path.
@@ -731,12 +773,29 @@ server with `READ_ONLY=false`.
   report. But the count is in the message that decides whether anyone reaches
   for the plan path, and the difference between one and two is the difference
   between "I will fix that link myself" and "I had better use the tool".
+
+  Fixing the count did not fix the list under it. The rows were still built as
+  `[[target]]` by hand in three separate places, so the two links that had
+  disagreed on the number now agreed and printed identically, and the embed
+  marker and subpath that made them different were exactly what got dropped. A
+  count and the list beneath it are two claims, and correcting the one that was
+  measured leaves the one that was only ever displayed. One `renderWikilink`
+  now, used by all three, with the message asserted rather than the data: the
+  unit test for `resolutionImpact` passed throughout, because the fields were
+  always there and the renderer never asked for them.
 - **A default that is right for prose can be wrong for the case the tool
   advertises first.** `append_note` separated with a blank line whatever it was
   separating, so adding a list item to a list ended the list and started a
   second one, rendering with a gap. The tool description's own first example is
   "a line to a running list". The separator now looks at whether the line before
   and the text after are both list items.
+- **A message is not tested by testing the data behind it.** Twice in two days a
+  fix landed in the value and not in the sentence: the scope challenge was right
+  in `scopes_supported` and wrong in the header a client actually reads, and the
+  link count was right in `resolutionImpact` and wrong in the list the refusal
+  printed. Both times the unit test passed, because both times it asserted the
+  data. Both were found by a pass that read the output. The rule that falls out:
+  where a message is the product, assert the message.
 - **The vault's day is not the container's day, in both directions.** The note on
   `VAULT_TIMEZONE` covers the container being ten hours behind Brisbane. The
   consequence the other way is that after 14:00 UTC a capture files under

@@ -15,19 +15,8 @@ import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { classifyProperty, parseNote, propertyValueToText } from "../note/parse.js";
 import { DROP_ALL, SCHEMA, SCHEMA_VERSION } from "./schema.js";
-import { candidateTargets, resolveTarget } from "./resolve.js";
+import { candidateTargets, LinkResolver } from "./resolve.js";
 import type { AssembledFile } from "../vault-model/index.js";
-
-/**
- * A link target, escaped so LIKE reads it as text.
- *
- * `_` in a LIKE pattern means "any character", so without this a link written
- * `[[report_2026]]` also resolves against `report-2026.md`, silently and in
- * favour of whichever is shorter. `notesUnder` learned the same lesson about
- * folder names; this is the other half of it, and the one that decides what a
- * link means rather than what a batch includes.
- */
-const LIKE_SAFE_TARGET = `REPLACE(REPLACE(REPLACE(links.target, '\\', '\\\\'), '%', '\\%'), '_', '\\_')`;
 
 export interface IndexedNote {
     path: string;
@@ -377,38 +366,37 @@ export class VaultIndex {
      * than per note, because a link often points at a note that has not been
      * indexed yet.
      */
+    /**
+     * Fill in where every link points.
+     *
+     * The rule lives in `src/index/resolve.ts` and this applies it. It used to
+     * live here as well, as four `UPDATE` passes, and the two copies had to be
+     * kept in step by a test: one of them escaped a `LIKE` pattern and the
+     * other did not, one was case-sensitive in two passes and the other was
+     * insensitive in all four, and neither knew that a link without an
+     * extension should find a PDF. One copy now.
+     *
+     * A sweep resolves every link rather than the ones that could have changed,
+     * which is what the SQL did too. It costs one pass over the links table
+     * against maps built once, so it stays cheap on the changes feed.
+     */
     resolveLinks(): void {
-        // Four passes, most specific first, each filling only what is still
-        // unresolved. Expressing the precedence as an ORDER BY inside one
-        // correlated subquery would be neater, but SQLite rejects an outer
-        // reference there ("no such column: links.target") even though it
-        // allows one in the WHERE. Passes also read more plainly than a
-        // nested CASE.
-        //
-        // Ties within a pass go to the shortest path, which is Obsidian's
-        // behaviour: a note at the vault root wins over a deeply nested one.
-        // The path itself breaks a tie between two of equal length, so that
-        // asking twice gives the same answer.
-        const passes = [
-            `n.path = links.target`, // exact path, including extension
-            `n.path = links.target || '.md'`, // path without the extension
-            `n.path LIKE '%/' || ${LIKE_SAFE_TARGET} ESCAPE '\\'`, // basename, with extension
-            `n.path LIKE '%/' || ${LIKE_SAFE_TARGET} || '.md' ESCAPE '\\'`, // basename, without
-        ];
+        const resolver = new LinkResolver(this.allPaths());
+        const links = this.db
+            .prepare(`SELECT rowid, target FROM links WHERE target <> ''`)
+            .all() as unknown as { rowid: number; target: string }[];
+
+        const update = this.db.prepare(`UPDATE links SET resolved_path = ? WHERE rowid = ?`);
 
         this.db.exec("BEGIN");
         try {
             this.db.exec(`UPDATE links SET resolved_path = NULL`);
-            for (const match of passes) {
-                this.db.exec(`
-                    UPDATE links SET resolved_path = (
-                        SELECT n.path FROM notes n
-                        WHERE ${match}
-                        ORDER BY LENGTH(n.path), n.path
-                        LIMIT 1
-                    )
-                    WHERE resolved_path IS NULL AND target <> ''
-                `);
+            // One statement per link rather than per distinct target: the
+            // resolver answers from a map, so the cost here is the write, and
+            // grouping would only save repeats of a lookup that is already free.
+            for (const link of links) {
+                const resolved = resolver.resolve(link.target);
+                if (resolved !== undefined) update.run(resolved, link.rowid);
             }
             this.db.exec("COMMIT");
         } catch (error) {
@@ -443,12 +431,17 @@ export class VaultIndex {
      * exist and a link that now prefers the copy has genuinely changed meaning.
      */
     resolutionImpact(from: string, to: string, options: { keepSource?: boolean } = {}): ResolutionImpact {
-        const before = this.allPaths();
-        const after = new Set(options.keepSource ? before : before.filter((path) => path !== from));
+        const paths = this.allPaths();
+        const after = new Set(options.keepSource ? paths : paths.filter((path) => path !== from));
         after.add(to);
 
         const impact: ResolutionImpact = { breaks: [], repoints: [] };
         if (from === to) return impact;
+
+        // Two views of the vault, built once each. Every candidate link is
+        // asked of both, and the difference is the answer.
+        const before = new LinkResolver(paths);
+        const afterwards = new LinkResolver(after);
 
         // Only these two paths differ between the two vaults, so a link whose
         // target could never match either of them cannot change, whatever else
@@ -483,8 +476,8 @@ export class VaultIndex {
         }[];
 
         for (const row of rows) {
-            const was = resolveTarget(row.target, before);
-            const becomes = resolveTarget(row.target, after);
+            const was = before.resolve(row.target);
+            const becomes = afterwards.resolve(row.target);
             if (was === undefined || was === becomes) continue;
 
             const link: LinkReference = {

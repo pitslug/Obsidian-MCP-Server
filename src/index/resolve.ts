@@ -1,82 +1,172 @@
 /**
- * Link resolution, in code rather than in SQL.
+ * Where a link points.
  *
- * `VaultIndex.resolveLinks` does this in four UPDATE passes over the whole
- * links table, which is the right shape for filling a column and the wrong
- * shape for the question moving a file asks: what would resolution look like if
- * this path were that one instead? That is hypothetical, so it cannot be
- * answered by a table the vault has not been written to yet.
+ * One implementation, used by everything that needs the answer: the index when
+ * it fills `links.resolved_path`, and `resolutionImpact` when it asks what the
+ * answer would be if a file were somewhere else. That second question is
+ * hypothetical, so it cannot be answered by a table, and for two days the rule
+ * therefore existed twice: four `UPDATE` passes in SQL and a mirror of them
+ * here, with a test asserting the two agreed. They did agree. Keeping them
+ * agreeing was the tax, and the mirror is gone now: the SQL passes were deleted
+ * and `resolveLinks` calls this.
  *
- * So the rule exists twice, and the second copy is the liability. The passes
- * below mirror the SQL exactly, including the parts that look like accidents:
+ * ## The rule
  *
- *  - The first two passes compare with `=`, which SQLite makes case-sensitive,
- *    and the last two with `LIKE`, which it makes case-insensitive over ASCII.
- *    Obsidian resolves links case-insensitively, so the LIKE passes are the
- *    ones that behave; the asymmetry is left alone here because changing it
- *    would change which note real links point at, which is not a thing to do
- *    inside a change about moving files.
- *  - Ties within a pass go to the shortest path, which is Obsidian's own
- *    behaviour: a note at the root wins over a deeply nested one.
+ * A link may name a file by its whole path, or by any tail of that path
+ * beginning at a folder boundary, which is what lets `[[Attachments/Deck.pptx]]`
+ * and `[[Deck.pptx]]` both find `Meetings/RLT/Attachments/Deck.pptx`. Call any
+ * of those a name for the file. The extension may be left off. So, most
+ * specific first:
  *
- * `test/index/resolve.spec.ts` runs both implementations over the same vault
- * and asserts they agree, because a mirror nobody checks is just a fork.
+ *  1. A file one of whose names is exactly the target.
+ *  2. A note one of whose names, with `.md` left off, is the target.
+ *  3. Any other file, one of whose names with its extension left off is the target.
+ *
+ * The third pass is why this file was rewritten. Without it `[[Anthony
+ * Chaytors]]` finds nothing when the vault holds `Interacts/Anthony
+ * Chaytors.pdf`, which Obsidian opens without hesitating. That was not merely
+ * an unhelpful answer: `vault_health` called the link broken, and
+ * `resolutionImpact` could not see it, so moving that PDF reported that no link
+ * would break and then broke one. A vault of PDFs named after people is exactly
+ * the shape that invites a link written without the extension.
+ *
+ * `.md` is preferred over any other extension, which is what the second pass
+ * buys by sitting above the third: a vault holding `Peter Litzow.md` and `Peter
+ * Litzow.pdf` answers `[[Peter Litzow]]` with the note.
+ *
+ * ## Ties
+ *
+ * Within a pass, a match that reproduces the file's own capitalisation wins,
+ * then the shortest path, then alphabetical order. Shortest is Obsidian's own
+ * behaviour, and the other two are tie-breaks so that asking twice gives the
+ * same answer: a vault with two equally short candidates would otherwise
+ * resolve by whatever order the rows came back in.
+ *
+ * Matching is otherwise case-insensitive. The SQL this replaced was
+ * case-sensitive in its first two passes and insensitive in the other two,
+ * because `=` and `LIKE` differ in SQLite, and that asymmetry was documented
+ * here as a wart to leave alone. It is gone: Obsidian is case-insensitive, and
+ * having the rule in one place is what made fixing it a one-line decision
+ * rather than a schema question.
  */
 
-/**
- * Lowercase the way SQLite's LIKE does, which is ASCII only.
- *
- * `toLowerCase()` would fold characters SQLite leaves alone, so a vault holding
- * two notes differing only outside ASCII would resolve differently here than in
- * the index. Rare, and free to get right.
- */
-function asciiLower(text: string): string {
-    return text.replace(/[A-Z]/g, (character) => character.toLowerCase());
+/** A file's name, without any folders. */
+function basename(path: string): string {
+    return path.slice(path.lastIndexOf("/") + 1);
 }
 
-/** Whether `path` matches `target` under pass `pass`, counting from zero. */
-function matchesPass(path: string, target: string, pass: number): boolean {
-    switch (pass) {
-        case 0:
-            return path === target;
-        case 1:
-            return path === `${target}.md`;
-        case 2:
-            return asciiLower(path).endsWith(`/${asciiLower(target)}`);
-        default:
-            return asciiLower(path).endsWith(`/${asciiLower(target)}.md`);
+/** A path with its last extension removed, or undefined when it has none. */
+function withoutExtension(path: string): string | undefined {
+    const name = basename(path);
+    const dot = name.lastIndexOf(".");
+    if (dot <= 0) return undefined;
+    return path.slice(0, path.length - (name.length - dot));
+}
+
+function isNote(path: string): boolean {
+    return path.toLowerCase().endsWith(".md");
+}
+
+/** The path itself, then each tail of it starting after a folder boundary. */
+function names(path: string): string[] {
+    const found = [path];
+    for (let at = path.indexOf("/"); at !== -1; at = path.indexOf("/", at + 1)) {
+        const tail = path.slice(at + 1);
+        if (tail !== "") found.push(tail);
     }
+    return found;
 }
 
 /**
- * Where a link target points, given the paths a vault holds.
+ * The vault's paths, arranged so a link can be resolved without walking them.
  *
- * Undefined means the link is broken. An empty target is a link to a heading
- * within the same note and has no target to resolve, which is why the index
- * skips those too.
+ * Built once per resolution sweep rather than once per link. The changes feed
+ * re-resolves the whole table on every change, which was affordable at this
+ * vault's size when it was four SQL statements and would stop being affordable
+ * as a nested loop over every path for every link.
  */
-export function resolveTarget(target: string, paths: Iterable<string>): string | undefined {
-    if (target === "") return undefined;
+export class LinkResolver {
+    /** One map per pass, in the order the passes are tried. */
+    private readonly passes: Map<string, string[]>[];
 
-    const all = [...paths];
-    for (let pass = 0; pass < 4; pass++) {
-        let best: string | undefined;
-        for (const path of all) {
-            if (!matchesPass(path, target, pass)) continue;
-            // Shortest wins, then alphabetical. The second half is not
-            // Obsidian's rule, it is a tie-break for paths of equal length so
-            // that two runs of the same question give the same answer.
-            if (
-                best === undefined ||
-                path.length < best.length ||
-                (path.length === best.length && path < best)
-            ) {
-                best = path;
+    constructor(paths: Iterable<string>) {
+        const exact = new Map<string, string[]>();
+        const noteStems = new Map<string, string[]>();
+        const otherStems = new Map<string, string[]>();
+
+        const add = (map: Map<string, string[]>, key: string, path: string): void => {
+            if (key === "") return;
+            const lower = key.toLowerCase();
+            const found = map.get(lower);
+            if (found) found.push(path);
+            else map.set(lower, [path]);
+        };
+
+        for (const path of paths) {
+            const stems = isNote(path) ? noteStems : otherStems;
+            for (const name of names(path)) {
+                add(exact, name, path);
+                const stem = withoutExtension(name);
+                if (stem !== undefined) add(stems, stem, path);
             }
         }
-        if (best !== undefined) return best;
+
+        this.passes = [exact, noteStems, otherStems];
     }
-    return undefined;
+
+    /**
+     * Where this target points, or undefined when it points at nothing.
+     *
+     * An empty target is a link to a heading inside the same note. It has no
+     * target to resolve, which is why the index skips those too.
+     */
+    resolve(target: string): string | undefined {
+        if (target === "") return undefined;
+        const lower = target.toLowerCase();
+
+        for (const pass of this.passes) {
+            const candidates = pass.get(lower);
+            if (candidates === undefined) continue;
+            if (candidates.length === 1) return candidates[0];
+            return best(candidates, target);
+        }
+        return undefined;
+    }
+}
+
+/**
+ * The winner among several candidates in one pass.
+ *
+ * Exact case first, because a vault that has bothered to distinguish `readme`
+ * from `README` means something by it. Then the shortest path, which is
+ * Obsidian's rule and reads as "the least buried one". Then alphabetical, which
+ * decides nothing anybody cares about and decides it the same way every time.
+ */
+function best(candidates: readonly string[], target: string): string {
+    let winner = candidates[0] as string;
+    for (const candidate of candidates.slice(1)) {
+        const exact = matchesCase(candidate, target);
+        if (exact !== matchesCase(winner, target)) {
+            if (exact) winner = candidate;
+            continue;
+        }
+        if (candidate.length < winner.length) winner = candidate;
+        else if (candidate.length === winner.length && candidate < winner) winner = candidate;
+    }
+    return winner;
+}
+
+/** Whether the part of the path the target named matches it character for character. */
+function matchesCase(path: string, target: string): boolean {
+    if (path === target || path.endsWith(`/${target}`)) return true;
+    const stem = withoutExtension(path);
+    if (stem === undefined) return false;
+    return stem === target || stem.endsWith(`/${target}`);
+}
+
+/** Where a link target points, given the paths a vault holds. */
+export function resolveTarget(target: string, paths: Iterable<string>): string | undefined {
+    return new LinkResolver(paths).resolve(target);
 }
 
 /**
@@ -84,27 +174,21 @@ export function resolveTarget(target: string, paths: Iterable<string>): string |
  *
  * The inverse of the passes above, and the reason a move does not have to
  * re-resolve every link in the vault: a link whose target is not in this list
- * for either the old path or the new one cannot change its meaning, because
- * neither pass would have looked at those paths in the first place.
+ * for either the old path or the new one cannot change its meaning, because no
+ * pass would have looked at those paths in the first place.
  *
- * For `Meetings/RLT/Notes.md` that is the full path, the path without its
- * extension, and each suffix beginning at a folder boundary with and without
- * the extension: `RLT/Notes.md`, `RLT/Notes`, `Notes.md`, `Notes`.
+ * For `Interacts/Anthony Chaytors.pdf` that is the full path and each tail of
+ * it beginning at a folder boundary, with and without the extension. The
+ * extension comes off whatever it is, not only `.md`, which is the half that
+ * was missing: without it `resolutionImpact` never asked about `[[Anthony
+ * Chaytors]]`, and a move of that file reported no links affected.
  */
 export function candidateTargets(path: string): string[] {
     const found = new Set<string>();
-    const add = (value: string): void => {
-        if (value === "") return;
-        found.add(value);
-        // Only `.md` can be left off a link, because only the `.md` passes
-        // append an extension of their own.
-        if (value.toLowerCase().endsWith(".md")) found.add(value.slice(0, -3));
-    };
-
-    add(path);
-    for (let at = path.indexOf("/"); at !== -1; at = path.indexOf("/", at + 1)) {
-        add(path.slice(at + 1));
+    for (const name of names(path)) {
+        found.add(name);
+        const stem = withoutExtension(name);
+        if (stem !== undefined && stem !== "") found.add(stem);
     }
-
     return [...found];
 }

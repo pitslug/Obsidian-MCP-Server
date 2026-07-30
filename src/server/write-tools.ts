@@ -39,6 +39,7 @@ import type { VaultReader } from "../vault/reader.js";
 import { NoteNotFoundError } from "../vault/reader.js";
 import { editFrontmatter, FrontmatterUnreadableError } from "../note/frontmatter.js";
 import { AmbiguousHeadingError, appendUnderHeading, defaultSeparator } from "../note/sections.js";
+import { renderWikilink } from "../note/links.js";
 import { civilDateIn, fillTemplate, inferDailyFormat, TimeZoneError } from "../note/daily.js";
 import type { ResolutionImpact, VaultIndex } from "../index/index.js";
 import {
@@ -184,7 +185,7 @@ function linkRefusal(impact: ResolutionImpact, from: string, to: string, planToo
         lines.push(
             "",
             `${impact.breaks.length} link(s) would stop resolving:`,
-            ...impact.breaks.slice(0, 10).map((link) => `  ${link.source}: [[${link.target}]]`),
+            ...impact.breaks.slice(0, 10).map((link) => `  ${link.source}: ${renderWikilink(link)}`),
             ...(impact.breaks.length > 10 ? [`  and ${impact.breaks.length - 10} more`] : [])
         );
     }
@@ -198,7 +199,7 @@ function linkRefusal(impact: ResolutionImpact, from: string, to: string, planToo
             `${impact.repoints.length} link(s) would quietly name a different file:`,
             ...impact.repoints
                 .slice(0, 10)
-                .map((link) => `  ${link.source}: ${asWritten(link)} would mean ${link.becomes}`),
+                .map((link) => `  ${link.source}: ${renderWikilink(link)} would mean ${link.becomes}`),
             ...(impact.repoints.length > 10 ? [`  and ${impact.repoints.length - 10} more`] : [])
         );
     }
@@ -210,11 +211,6 @@ function linkRefusal(impact: ResolutionImpact, from: string, to: string, planToo
             `same link text twice is one entry here and two rewrites there.`
     );
     return lines.join("\n");
-}
-
-/** A link the way it appears in the note, so a reader can find it. */
-function asWritten(link: { target: string; subpath?: string; embed?: boolean }): string {
-    return `${link.embed ? "!" : ""}[[${link.target}${link.subpath ? `#${link.subpath}` : ""}]]`;
 }
 
 /** Turn the errors a write can raise into something a model can act on. */
@@ -797,7 +793,7 @@ function copyRefusal(impact: ResolutionImpact, from: string, to: string): string
             .slice(0, 10)
             .map(
                 (link) =>
-                    `  ${link.source}: [[${link.target}]] would mean ${link.becomes} instead of ${link.was}`
+                    `  ${link.source}: ${renderWikilink(link)} would mean ${link.becomes} instead of ${link.was}`
             ),
         ...(impact.repoints.length > 10 ? [`  and ${impact.repoints.length - 10} more`] : []),
         "",

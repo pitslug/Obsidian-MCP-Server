@@ -2,11 +2,11 @@
  * Link resolution, and what moving a file would do to it.
  *
  * Two things are being checked here and they are worth separating. The first is
- * that the code copy of the resolution rule agrees with the SQL copy, because
- * `resolutionImpact` answers a hypothetical question that no table can answer
- * and therefore had to restate the rule. The second is the impact itself, where
- * the case that matters is not the broken link but the silent one: a link that
- * still resolves, to something else.
+ * where a link points, which used to be a parity check between a SQL copy of
+ * the rule and a code copy of it, and is now a table of the answers Obsidian
+ * gives. The second is the impact of a move, where the case that matters is not
+ * the broken link but the silent one: a link that still resolves, to something
+ * else.
  */
 
 import { beforeEach, afterEach, describe, expect, it } from "vitest";
@@ -46,17 +46,6 @@ function binary(path: string): AssembledFile {
     } as AssembledFile;
 }
 
-/** How the index resolved each link, as a map from "source|target". */
-function resolvedByIndex(): Map<string, string | undefined> {
-    const out = new Map<string, string | undefined>();
-    for (const path of index.allPaths()) {
-        for (const link of index.outgoingLinks(path)) {
-            out.set(`${path}|${link.target}`, link.resolvedPath);
-        }
-    }
-    return out;
-}
-
 beforeEach(() => {
     index = new VaultIndex(":memory:");
     index.open();
@@ -66,66 +55,79 @@ afterEach(() => {
     index.close();
 });
 
-describe("the two copies of the resolution rule", () => {
-    it("agree on every link in a vault that exercises all four passes", () => {
-        // One note per pass, plus the shapes that have caught this out before:
-        // a duplicate basename, a partial path, a case difference, and an
-        // underscore that LIKE would otherwise read as a wildcard.
+describe("resolving a link", () => {
+    /**
+     * One vault, one table of cases.
+     *
+     * This used to assert that two implementations of the rule agreed with each
+     * other, because there were two: four UPDATE passes in SQL and a mirror of
+     * them in code. There is one now, so the useful question is no longer
+     * whether the copies match but whether the answers are right, and these are
+     * the answers Obsidian gives.
+     */
+    beforeEach(() => {
+        index.put(binary("Interacts/Anthony Chaytors.pdf"));
         index.put(binary("Interacts/Peter Litzow.pdf"));
         index.put(binary("Interacts/Superseded/Peter Litzow.pdf"));
         index.put(binary("Meetings/RLT/Attachments/Deck.pptx"));
         index.put(note("Meetings/RLT/Strategy.md"));
         index.put(note("report-2026.md"));
-        index.put(
-            note(
-                "Hub.md",
-                [
-                    "[[Meetings/RLT/Strategy.md]]", // exact path
-                    "[[Meetings/RLT/Strategy]]", // path without the extension
-                    "![[Deck.pptx]]", // basename with extension
-                    "[[Strategy]]", // basename without
-                    "[[Attachments/Deck.pptx]]", // a partial path
-                    "[[peter litzow]]", // a case difference
-                    "[[report_2026]]", // an underscore, not a wildcard
-                    "[[Nothing At All]]", // resolves to nothing
-                ].join("\n\n")
-            )
-        );
-        index.resolveLinks();
-
-        const paths = index.allPaths();
-        const fromSql = resolvedByIndex();
-        expect(fromSql.size).toBe(8);
-
-        for (const [key, resolved] of fromSql) {
-            const target = key.slice(key.indexOf("|") + 1);
-            expect(resolveTarget(target, paths), `resolving "${target}"`).toBe(resolved);
-        }
     });
 
-    it("does not resolve an extensionless link to a file that is not a note", () => {
-        // Obsidian would: `[[Peter Litzow]]` opens the PDF when nothing else
-        // carries that name. Both copies of the rule here only ever append
-        // ".md", so the link is broken instead. Written down rather than
-        // fixed, because changing what an existing link means is not a thing
-        // to do inside a change about moving files, and a link this reports as
-        // broken is at least visible in vault_health.
-        index.put(binary("Interacts/Peter Litzow.pdf"));
-        index.put(note("Hub.md", "[[Peter Litzow]]"));
+    const cases: [string, string | undefined][] = [
+        ["Meetings/RLT/Strategy.md", "Meetings/RLT/Strategy.md"], // the whole path
+        ["Meetings/RLT/Strategy", "Meetings/RLT/Strategy.md"], // the path, no extension
+        ["Deck.pptx", "Meetings/RLT/Attachments/Deck.pptx"], // a name with its extension
+        ["Strategy", "Meetings/RLT/Strategy.md"], // a note's name alone
+        ["Attachments/Deck.pptx", "Meetings/RLT/Attachments/Deck.pptx"], // part of a path
+        ["Anthony Chaytors", "Interacts/Anthony Chaytors.pdf"], // an attachment, unextended
+        ["Attachments/Deck", "Meetings/RLT/Attachments/Deck.pptx"], // both at once
+        ["RLT/Attachments/Deck.pptx", "Meetings/RLT/Attachments/Deck.pptx"], // any tail, not just the last
+        ["ts/Deck.pptx", undefined], // and only tails that start where a folder does
+        ["anthony chaytors", "Interacts/Anthony Chaytors.pdf"], // case does not matter
+        ["Peter Litzow", "Interacts/Peter Litzow.pdf"], // the shallower of two
+        ["report_2026", undefined], // an underscore is a character, not a wildcard
+        ["Nothing At All", undefined],
+    ];
+
+    for (const [target, expected] of cases) {
+        it(`resolves [[${target}]] to ${expected ?? "nothing"}`, () => {
+            index.put(note("Hub.md", `[[${target}]]`));
+            index.resolveLinks();
+
+            // Through the index, which is what every tool reads, and through
+            // the resolver directly, which is what resolutionImpact asks.
+            expect(index.outgoingLinks("Hub.md")[0]?.resolvedPath).toBe(expected);
+            expect(resolveTarget(target, index.allPaths())).toBe(expected);
+        });
+    }
+
+    it("prefers a note over an attachment of the same name", () => {
+        // Obsidian's own preference, and the reason the extensionless passes
+        // sit below the two that append ".md" rather than replacing them.
+        index.put(note("Interacts/Anthony Chaytors.md"));
+        index.put(note("Hub.md", "[[Anthony Chaytors]]"));
         index.resolveLinks();
 
-        expect(index.outgoingLinks("Hub.md")[0]?.resolvedPath).toBeUndefined();
-        expect(resolveTarget("Peter Litzow", index.allPaths())).toBeUndefined();
+        expect(index.outgoingLinks("Hub.md")[0]?.resolvedPath).toBe("Interacts/Anthony Chaytors.md");
     });
 
-    it("does not let an underscore in a link act as a wildcard", () => {
-        // `[[report_2026]]` matching `report-2026.md` is what LIKE does
-        // unescaped, and it decides what a link means rather than merely what a
-        // listing includes.
-        index.put(note("notes/report-2026.md"));
-        index.put(note("Hub.md", "[[report_2026]]"));
+    it("prefers an exact case match to a shorter path", () => {
+        index.put(note("README.md"));
+        index.put(note("archive/readme.md"));
+        index.put(note("Hub.md", "[[readme]]"));
         index.resolveLinks();
 
+        expect(index.outgoingLinks("Hub.md")[0]?.resolvedPath).toBe("archive/readme.md");
+    });
+
+    it("clears a link that no longer resolves", () => {
+        index.put(note("Hub.md", "[[Strategy]]"));
+        index.resolveLinks();
+        expect(index.outgoingLinks("Hub.md")[0]?.resolvedPath).toBe("Meetings/RLT/Strategy.md");
+
+        index.remove("Meetings/RLT/Strategy.md");
+        index.resolveLinks();
         expect(index.outgoingLinks("Hub.md")[0]?.resolvedPath).toBeUndefined();
     });
 });
@@ -144,9 +146,17 @@ describe("candidateTargets", () => {
         );
     });
 
-    it("does not offer to drop an extension that is not .md", () => {
+    it("drops any extension, not only .md", () => {
+        // The half that was missing. Without the unextended forms here,
+        // resolutionImpact never asks about `[[Peter Litzow]]`, and a move of
+        // that PDF reports that no link would be affected.
         expect(candidateTargets("Interacts/Peter Litzow.pdf").sort()).toEqual(
-            ["Interacts/Peter Litzow.pdf", "Peter Litzow.pdf"].sort()
+            [
+                "Interacts/Peter Litzow.pdf",
+                "Interacts/Peter Litzow",
+                "Peter Litzow.pdf",
+                "Peter Litzow",
+            ].sort()
         );
     });
 });

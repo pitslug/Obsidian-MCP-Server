@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { retarget, rewriteLinkTargets } from "../../src/note/links.js";
+import { renderWikilink, retarget, rewriteLinkTargets } from "../../src/note/links.js";
 
 const rewrite = (text: string, from: string, to: string, targets: string[]) =>
     rewriteLinkTargets(text, { from, to, targets });
@@ -168,5 +168,25 @@ describe("choosing a target that actually resolves", () => {
         });
 
         expect(out.text).toBe("See [[Minutes]].");
+    });
+});
+
+describe("naming a link in a message", () => {
+    it("prints it the way the note has it", () => {
+        expect(renderWikilink({ target: "Notes" })).toBe("[[Notes]]");
+        expect(renderWikilink({ target: "Notes", embed: true })).toBe("![[Notes]]");
+        expect(renderWikilink({ target: "Notes", subpath: "Actions" })).toBe("[[Notes#Actions]]");
+        expect(renderWikilink({ target: "Notes", subpath: "Actions", embed: true })).toBe(
+            "![[Notes#Actions]]"
+        );
+    });
+
+    it("distinguishes two links a rename would both affect", () => {
+        // The point of it. Reconstructed from the target alone these are the
+        // same string, so a refusal listing both prints one line twice and the
+        // reader cannot tell an embed is about to change.
+        const plain = renderWikilink({ target: "target" });
+        const embedded = renderWikilink({ target: "target", subpath: "Detail", embed: true });
+        expect(plain).not.toBe(embedded);
     });
 });

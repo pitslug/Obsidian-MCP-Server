@@ -762,6 +762,15 @@ describe("moving and copying a file", () => {
         expect(out).toContain("Nothing was written");
         expect(out).toContain("links/hub.md");
         expect(out).toContain("plan_move");
+
+        // Counted and printed as a reader would see them. The count was fixed
+        // first and the list was not, so for a day this said "2 link(s)" and
+        // then printed the same reconstructed `[[filed]]` twice, which reads
+        // as a double-counting bug and loses the one distinction the list is
+        // for: that one of them is an embed of a section.
+        expect(out).toContain("2 link(s) would stop resolving");
+        expect(out).toContain("links/hub.md: [[filed]]");
+        expect(out).toContain("links/hub.md: ![[filed#Detail]]");
         // Refused means refused: nothing at the new path, and the old one intact.
         expect(await inVault("links/archive/minutes.md")).toBeUndefined();
         expect(await inVault("links/archive/filed.md")).toContain("## Detail");

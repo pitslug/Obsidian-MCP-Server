@@ -28,6 +28,21 @@
 import { MARKDOWN_LINK, WIKILINK, maskForRewriting } from "./parse.js";
 import { resolveTarget } from "../index/resolve.js";
 
+/**
+ * A link as it appears in the note, from what the index recorded of it.
+ *
+ * One definition, because the alternative was three. Every message that names
+ * an affected link was building `[[target]]` by hand, which is not the link:
+ * it is the link with its embed marker and its subpath removed, so two rows
+ * that differ print identically and the one detail a reader needs, that this is
+ * an embed of a section, is the detail that goes. Found on 31 July 2026 by a
+ * connector pass reading the messages, after a fix that corrected the count
+ * above the same list and left the list alone.
+ */
+export function renderWikilink(link: { target: string; subpath?: string; embed?: boolean }): string {
+    return `${link.embed ? "!" : ""}[[${link.target}${link.subpath ? `#${link.subpath}` : ""}]]`;
+}
+
 export interface LinkRewrite {
     text: string;
     /** How many links were rewritten. */
