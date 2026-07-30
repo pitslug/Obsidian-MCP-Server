@@ -203,6 +203,9 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
 
     const auth = createAuthWiring(config.auth, {
         onReject: (reason) => log.warn(`Rejected a request: ${reason}`),
+        // Which scopes a connecting client is told to ask for. Read-only unless
+        // this deployment can actually write, because the client asks once.
+        writeEnabled: !config.readOnly,
     });
 
     // Read once, at startup, because instructions are sent when a client

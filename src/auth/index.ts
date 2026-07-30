@@ -41,10 +41,33 @@ export interface AuthWiringOptions {
     /** Injectable for tests, which reach a fake issuer rather than the network. */
     fetchImpl?: typeof fetch;
     onReject?: (reason: string) => void;
+    /**
+     * Whether any registered tool can change the vault.
+     *
+     * This decides which scopes the server asks a client to obtain, and it has
+     * to, because the client only ever asks once. A connecting client reads the
+     * `scope` on the 401 challenge and requests exactly that; there is no
+     * second prompt when it later calls a tool that needs more, because the
+     * tool-level refusal is a tool result rather than another challenge.
+     *
+     * So a server that names only `vault:read` on the challenge gets a
+     * read-only token forever, however the authorization server is configured,
+     * and every write tool refuses for want of a scope nobody was ever asked
+     * for. That is not hypothetical: it is what happened on 30 July 2026, and
+     * from the outside it looks like a Pocket-ID misconfiguration.
+     */
+    writeEnabled?: boolean;
 }
 
 export function createAuthWiring(auth: AuthConfig, options: AuthWiringOptions = {}): AuthWiring {
     const reject = options.onReject ?? (() => undefined);
+
+    // What this deployment can actually use, which is what a client should be
+    // asking its authorization server for. Narrowed when writes are off, for
+    // the same reason the tools are absent then: advertising a permission that
+    // no registered tool could exercise is a request for access this server has
+    // no use for.
+    const offered: string[] = options.writeEnabled ? [...SUPPORTED_SCOPES] : [SCOPE_READ];
 
     if (auth.mode === "none") {
         return {
@@ -102,7 +125,7 @@ export function createAuthWiring(auth: AuthConfig, options: AuthWiringOptions = 
                     resourceMetadata,
                     error: rejected.code,
                     description: rejected.detail,
-                    scope: [SCOPE_READ],
+                    scope: offered,
                 });
             }
 
@@ -111,7 +134,7 @@ export function createAuthWiring(auth: AuthConfig, options: AuthWiringOptions = 
                 // answered rather than logged as a rejection, because a client
                 // that has never been told where to authenticate cannot have
                 // done anything else.
-                throw unauthorized({ resourceMetadata, scope: [SCOPE_READ] });
+                throw unauthorized({ resourceMetadata, scope: offered });
             }
 
             let principal;
@@ -124,7 +147,7 @@ export function createAuthWiring(auth: AuthConfig, options: AuthWiringOptions = 
                         resourceMetadata,
                         error: error.code,
                         description: error.detail,
-                        scope: [SCOPE_READ],
+                        scope: offered,
                     });
                 }
                 // Discovery failed, or the keys could not be fetched. That is
@@ -143,7 +166,7 @@ export function createAuthWiring(auth: AuthConfig, options: AuthWiringOptions = 
                 reject(`subject ${principal.subject} holds no ${SCOPE_READ} scope`);
                 throw insufficientScope({
                     resourceMetadata,
-                    scope: [SCOPE_READ],
+                    scope: offered,
                     description:
                         `This token grants none of the permissions this server needs. It must carry ` +
                         `at least "${SCOPE_READ}".`,
@@ -158,7 +181,7 @@ export function createAuthWiring(auth: AuthConfig, options: AuthWiringOptions = 
             protectedResource: {
                 resource: auth.resource,
                 authorizationServers: [auth.issuer],
-                scopesSupported: [...SUPPORTED_SCOPES],
+                scopesSupported: offered,
                 // Header only. A token in a query string ends up in the access
                 // log of every proxy on the path, and this server sits behind
                 // one that logs.

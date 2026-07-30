@@ -19,7 +19,7 @@ work.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 743 tests, ~90s
+npm test          # 744 tests, ~90s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -446,8 +446,11 @@ has the detail. Switch one is done and is meant to be lived with.
       refused for want of `vault:write` rather than succeeding. That is the scope
       gate observed rather than assumed, which was the whole point of the step.
       Nothing has been written to `obsidiandb` by this server.
-- [ ] Grant `vault:write` in Pocket-ID, with `COUCHDB_DATABASE` pointed at
-      `obsidian-writetest`.
+- [x] Grant `vault:write` in Pocket-ID, with `COUCHDB_DATABASE` pointed at
+      `obsidian-writetest`. Done 30 July 2026, and it exposed the challenge bug
+      above: granting the scope changed nothing until the server started asking
+      for it. Needs `v0.1.4` deployed and the connector reconnected before the
+      step means anything.
 - [ ] Point `COUCHDB_DATABASE` at `obsidiandb`.
 
 ### Smaller things, whenever
@@ -567,6 +570,27 @@ Then grant `vault:write`.
   instead of https: any of them rejects every token, and the log says the token
   was not issued for this server rather than that the setting is wrong.
 
+### The challenge is what decides which scopes a client ever holds
+
+A connecting client reads the `scope` on the 401 and asks its authorization
+server for exactly that. It asks **once**. There is no second prompt when it
+later calls a tool needing more, because the tool-level refusal is a tool result
+rather than another challenge, and nothing in a tool result can start an
+authorization flow.
+
+So this server names the scopes the deployment can actually use, computed from
+`READ_ONLY`: `vault:read` alone when writes are off, both when they are on. The
+same value goes in `scopes_supported`.
+
+Found on 30 July 2026, from the outside, and it looked like somebody else's
+problem: `vault:write` had been granted to the client in Pocket-ID, the consent
+screen asked for read only, and every write tool then refused for want of a
+scope that had never been requested. The challenge had `scope="vault:read"`
+hardcoded as "the minimum this request needs", which is what RFC 6750 describes
+and is the wrong thing to say to a client that will not ask again. Note the
+shape of it, which is the third time in two days: a value that was written once
+and describes something that changes.
+
 ### Scopes at the tool boundary
 
 The transport requires `vault:read` to connect at all, answering a token without
@@ -669,6 +693,13 @@ server with `READ_ONLY=false`.
   generalises past this bug. `NoteNotFoundError` means "nothing to read here",
   which is not the same claim as "nothing is here", and any code that treats the
   first as the second is one deleted note away from being wrong.
+- **A client asks for its scopes once, so the challenge is the whole
+  negotiation.** The 401's `scope` said `vault:read`, correctly describing the
+  minimum that request needed, and that is what Claude asked Pocket-ID for. The
+  `vault:write` grant sitting ready in Pocket-ID was never requested, so every
+  write tool refused, and the evidence pointed at the identity provider rather
+  than at us. What made it invisible from this side is that nothing failed: the
+  handshake succeeded, the token was valid, and the tools were all there.
 - **A cache that stops updating does not look broken, it looks smaller.** The
   index feed died on any error and stayed dead until the process restarted.
   Every answer it gave afterwards was correct, which is exactly the problem:

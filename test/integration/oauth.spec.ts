@@ -212,7 +212,28 @@ describe("the unauthenticated handshake", () => {
         const challenge = response.headers.get("www-authenticate") ?? "";
         expect(challenge).toMatch(/^Bearer /);
         expect(challenge).toContain(`resource_metadata="${base}/.well-known/oauth-protected-resource"`);
+        // Both scopes, because this deployment can write and the client asks
+        // once. A challenge naming only the floor gets a read-only token
+        // forever, whatever the authorization server would have granted, and
+        // every write tool then refuses for want of a scope nobody requested.
+        expect(challenge).toContain('scope="vault:read vault:write"');
+    }, 120_000);
+
+    it("asks only for read when this deployment cannot write", async () => {
+        // The other half of the same rule. Asking a person to grant a
+        // permission that no registered tool could exercise is a request for
+        // access this server has no use for.
+        const base = await startWithOAuth({ readOnly: true });
+        const response = await callMcp(base, INITIALIZE);
+
+        const challenge = response.headers.get("www-authenticate") ?? "";
         expect(challenge).toContain('scope="vault:read"');
+        expect(challenge).not.toContain("vault:write");
+
+        const metadata = (await (
+            await fetch(`${base}/.well-known/oauth-protected-resource`)
+        ).json()) as Record<string, unknown>;
+        expect(metadata.scopes_supported).toEqual(["vault:read"]);
     }, 120_000);
 
     it("serves protected resource metadata naming the issuer and this exact resource", async () => {
@@ -283,7 +304,7 @@ describe("presenting a token", () => {
         expect(response.status).toBe(403);
         const challenge = response.headers.get("www-authenticate") ?? "";
         expect(challenge).toContain('error="insufficient_scope"');
-        expect(challenge).toContain('scope="vault:read"');
+        expect(challenge).toContain('scope="vault:read vault:write"');
     }, 120_000);
 });
 
