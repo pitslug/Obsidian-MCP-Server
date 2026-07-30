@@ -79,8 +79,9 @@ export function serverInstructions(input: InstructionsInput): string {
                 "Three things about them are worth knowing before using one. Every write reads the " +
                 "note fresh and writes against the revision it read, so a tool refusing with a " +
                 "conflict means another device changed it and the right response is to read it " +
-                "again rather than to retry. Deleting is soft and cannot be undone through this " +
-                "server, so read a note before removing it and say what is going. And anything " +
+                "again rather than to retry. Deleting is soft, and restore_note can usually undo " +
+                "one, though not after the sync plugin has collected the pieces, so read a note " +
+                "before removing it and say what is going rather than relying on that. And anything " +
                 "touching more than one note goes through a plan: the planning tool writes " +
                 "nothing and returns a description that is meant to be shown to the person who " +
                 "asked, in full, before commit_plan is called with its ID. Committing a plan " +

@@ -56,10 +56,14 @@ export interface TagSummary {
     noteCount: number;
 }
 
-/** A link, named by the note holding it and the target as written. */
+/** A link, named by the note holding it and how it was written. */
 export interface LinkReference {
     source: string;
     target: string;
+    /** A heading or block reference after `#`, if the link had one. */
+    subpath?: string;
+    /** True for `![[embeds]]`. */
+    embed?: boolean;
 }
 
 /** A link that would resolve somewhere else, with both answers. */
@@ -452,22 +456,46 @@ export class VaultIndex {
         // every link in the vault.
         const targets = [...new Set([...candidateTargets(from), ...candidateTargets(to)])];
         const placeholders = targets.map(() => "?").join(", ");
+        // Subpath and embed are in the projection, and they are not decoration.
+        // Selecting only the source and the target collapses `[[note]]` and
+        // `![[note#Section]]` in one file into a single row, because they share
+        // a target, and the refusal then reports one link where `plan_move`
+        // goes on to rewrite two. The check itself was never affected, since
+        // resolution reads the target and nothing else, but a count that
+        // disagrees with the tool it sends you to is a count nobody trusts.
+        //
+        // The index stores one row per target, subpath and embed, so two
+        // identical links in one note are still one row here. That is a
+        // narrower gap than the one it closes and it needs the schema to
+        // change, so it is left, and said out loud in the message.
         const rows = this.db
             .prepare(
-                `SELECT DISTINCT source_path, target FROM links
+                `SELECT DISTINCT source_path, target, subpath, embed FROM links
                  WHERE target <> ''
                    AND (resolved_path = ? OR target COLLATE NOCASE IN (${placeholders}))
-                 ORDER BY source_path, target`
+                 ORDER BY source_path, target, subpath`
             )
-            .all(from, ...(targets as never[])) as unknown as { source_path: string; target: string }[];
+            .all(from, ...(targets as never[])) as unknown as {
+            source_path: string;
+            target: string;
+            subpath: string | null;
+            embed: number;
+        }[];
 
         for (const row of rows) {
             const was = resolveTarget(row.target, before);
             const becomes = resolveTarget(row.target, after);
             if (was === undefined || was === becomes) continue;
 
+            const link: LinkReference = {
+                source: row.source_path,
+                target: row.target,
+                ...(row.subpath ? { subpath: row.subpath } : {}),
+                ...(row.embed === 1 ? { embed: true } : {}),
+            };
+
             if (becomes === undefined) {
-                impact.breaks.push({ source: row.source_path, target: row.target });
+                impact.breaks.push(link);
                 continue;
             }
             // The moved file taking its own inbound links with it. Only a move
@@ -475,7 +503,7 @@ export class VaultIndex {
             // link that has switched to the copy has been taken from it.
             if (!options.keepSource && was === from && becomes === to) continue;
 
-            impact.repoints.push({ source: row.source_path, target: row.target, was, becomes });
+            impact.repoints.push({ ...link, was, becomes });
         }
 
         return impact;

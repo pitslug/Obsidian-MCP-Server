@@ -728,7 +728,7 @@ async function main() {
                 "and what reassembles is not what was sent."
         );
         check(
-            withAction.text.includes("- action 39\n\n- inserted by verify:write\n\n## Attendees"),
+            withAction.text.includes("- action 39\n- inserted by verify:write\n\n## Attendees"),
             "The new line landed at the end of the section, above the next heading",
             "It went somewhere else in the note, which is what appending to the end would have done."
         );
@@ -1106,7 +1106,7 @@ async function main() {
         check(firstCapture.headingCreated, `Created the "Log" heading in a note that had none`);
         check(!secondCapture.headingCreated, "Reused it for the second capture");
         check(
-            (await verifier.text(dailyAppend.id, ctx)) === "## Log\n\n- first capture\n\n- second capture\n",
+            (await verifier.text(dailyAppend.id, ctx)) === "## Log\n\n- first capture\n- second capture\n",
             "Two captures land under one heading, in order",
             "A second capture into a fresh daily note is the commonest thing this tool will ever do."
         );

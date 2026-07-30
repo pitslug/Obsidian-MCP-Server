@@ -215,23 +215,38 @@ describe("resolutionImpact", () => {
         expect(impact.repoints).toEqual([]);
     });
 
-    it("counts an alias, a subpath and an embed as the same link", () => {
-        // The target is what resolves. What the reader sees, which heading it
-        // jumps to, and whether it renders inline are all downstream of that.
-        index.put(
-            note(
-                "Aliased.md",
-                "[[Peter Litzow.pdf|Pete]] and [[Peter Litzow.pdf#Findings]] and ![[Peter Litzow.pdf]]"
-            )
-        );
+    it("counts a plain link and an embed of the same note separately", () => {
+        // The count goes in a refusal that sends people to plan_move, and
+        // plan_move rewrites both, so reporting one was a message disagreeing
+        // with the tool it recommends. An alias is not a separate link: it
+        // changes what the reader sees and nothing about what resolves, and
+        // the index does not record it as its own row either.
+        index.put(note("Hub.md", "[[Peter Litzow.pdf|Pete]] and ![[Peter Litzow.pdf#Findings]]"));
         index.resolveLinks();
 
         const impact = index.resolutionImpact(
             "Interacts/Peter Litzow.pdf",
             "Interacts/Superseded/2026/Peter Litzow.pdf"
         );
-        const sources = impact.repoints.map((repoint) => repoint.source).sort();
-        expect(sources).toEqual(["Aliased.md", "Meetings/Notes.md"]);
+
+        const fromHub = impact.repoints.filter((repoint) => repoint.source === "Hub.md");
+        expect(fromHub.length).toBe(2);
+        expect(fromHub.map((link) => [link.subpath, link.embed])).toEqual([
+            [undefined, undefined],
+            ["Findings", true],
+        ]);
+    });
+
+    it("finds the break whether the link is plain or an embed", () => {
+        // The half of this that was never in doubt, asserted so it stays that
+        // way: resolution reads the target and nothing else, so collapsing two
+        // link rows that share a target could only ever undercount a report,
+        // never hide a break or a repoint.
+        index.put(note("Embeds.md", "![[Meetings/Notes]]"));
+        index.resolveLinks();
+
+        const impact = index.resolutionImpact("Meetings/Notes.md", "Meetings/Minutes.md");
+        expect(impact.breaks).toEqual([{ source: "Embeds.md", target: "Meetings/Notes", embed: true }]);
     });
 
     it("reports a copy that would take a link from the file it was copied from", () => {

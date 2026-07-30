@@ -59,7 +59,8 @@ export interface SectionAppendResult {
 export interface SectionAppendOptions {
     /**
      * Placed between the section's existing content and the new text. Defaults
-     * to a blank line, matching `append_note`.
+     * to a blank line, or to a single newline when a list item is being added
+     * to a list. See `defaultSeparator`.
      */
     separator?: string;
     /** Level to use if the heading has to be created. Defaults to 2. */
@@ -95,7 +96,6 @@ export function appendUnderHeading(
     // editor does: a note written on Windows should not acquire lone LFs
     // because something appended a line to it.
     const eol = noteText.includes("\r\n") ? "\r\n" : "\n";
-    const separator = options.separator ?? `${eol}${eol}`;
 
     const lines = body.split(/\r?\n/);
     const maskedLines = maskNonContent(body).split(/\r?\n/);
@@ -120,9 +120,12 @@ export function appendUnderHeading(
     while (at > found.line + 1 && (lines[at - 1] ?? "").trim() === "") at--;
 
     const sectionIsEmpty = at === found.line + 1;
-    const joiner = sectionIsEmpty ? `${eol}${eol}` : separator;
-
     const before = lines.slice(0, at).join(eol);
+    // A blank line after the heading either way, since a list needs one to
+    // start. Between two content lines it depends on what they are.
+    const joiner = sectionIsEmpty
+        ? `${eol}${eol}`
+        : (options.separator ?? defaultSeparator(before, content, eol));
     const after = lines.slice(at);
     const rest = after.length > 0 ? eol + after.join(eol) : "";
 
@@ -178,4 +181,26 @@ function createSection(body: string, heading: string, content: string, level: nu
     const hashes = "#".repeat(Math.min(6, Math.max(1, level)));
     const opening = trimmed.length === 0 ? "" : `${trimmed}${eol}${eol}`;
     return `${opening}${hashes} ${heading}${eol}${eol}${content}${eol}`;
+}
+
+/** A list item, at any indentation, bulleted or numbered. */
+const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+\S/;
+
+/**
+ * What to put between existing content and something appended to it.
+ *
+ * A blank line, except when a list item is being added to a list, where a blank
+ * line ends the list and starts a second one. Markdown renders that as two
+ * lists with a gap, which is not what "add a line to a running list" means, and
+ * that phrase is the first thing `append_note` says it is for.
+ *
+ * Both sides have to be list items. Adding a paragraph after a list is a new
+ * paragraph and wants the blank line; adding a list item after a paragraph
+ * starts a list and wants it too.
+ */
+export function defaultSeparator(before: string, addition: string, eol = "\n"): string {
+    const lastLine = before.split(/\r?\n/).findLast((line) => line.trim() !== "") ?? "";
+    const firstLine = addition.split(/\r?\n/).find((line) => line.trim() !== "") ?? "";
+    const joinsAList = LIST_ITEM.test(lastLine) && LIST_ITEM.test(firstLine);
+    return joinsAList ? eol : `${eol}${eol}`;
 }

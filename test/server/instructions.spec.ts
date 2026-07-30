@@ -41,8 +41,14 @@ describe("when writing is enabled", () => {
         expect(text.toLowerCase()).toContain("shown to the person");
     });
 
-    it("warns that a delete cannot be undone here", () => {
-        expect(text.toLowerCase()).toContain("cannot be undone");
+    it("says a delete can usually be undone, and when it cannot", () => {
+        // This sentence said the opposite until 31 July 2026, after
+        // restore_note had existed for a day. A model reading the old one
+        // would not offer the undo, which made the tool that exists to make a
+        // delete recoverable invisible at the moment it was wanted.
+        expect(text).toContain("restore_note");
+        expect(text.toLowerCase()).toContain("collected the pieces");
+        expect(text.toLowerCase()).not.toContain("cannot be undone");
     });
 
     it("points at vault_status rather than listing the tools itself", () => {

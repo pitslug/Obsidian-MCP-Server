@@ -38,7 +38,7 @@ import type { FastMCP } from "fastmcp";
 import type { VaultReader } from "../vault/reader.js";
 import { NoteNotFoundError } from "../vault/reader.js";
 import { editFrontmatter, FrontmatterUnreadableError } from "../note/frontmatter.js";
-import { AmbiguousHeadingError, appendUnderHeading } from "../note/sections.js";
+import { AmbiguousHeadingError, appendUnderHeading, defaultSeparator } from "../note/sections.js";
 import { civilDateIn, fillTemplate, inferDailyFormat, TimeZoneError } from "../note/daily.js";
 import type { ResolutionImpact, VaultIndex } from "../index/index.js";
 import {
@@ -198,7 +198,7 @@ function linkRefusal(impact: ResolutionImpact, from: string, to: string, planToo
             `${impact.repoints.length} link(s) would quietly name a different file:`,
             ...impact.repoints
                 .slice(0, 10)
-                .map((link) => `  ${link.source}: [[${link.target}]] would mean ${link.becomes}`),
+                .map((link) => `  ${link.source}: ${asWritten(link)} would mean ${link.becomes}`),
             ...(impact.repoints.length > 10 ? [`  and ${impact.repoints.length - 10} more`] : [])
         );
     }
@@ -206,9 +206,15 @@ function linkRefusal(impact: ResolutionImpact, from: string, to: string, planToo
     lines.push(
         "",
         `Use ${planTool}, which rewrites the affected links and shows you the whole plan before ` +
-            `anything is written.`
+            `anything is written. It may report more than the count above: a note that uses the ` +
+            `same link text twice is one entry here and two rewrites there.`
     );
     return lines.join("\n");
+}
+
+/** A link the way it appears in the note, so a reader can find it. */
+function asWritten(link: { target: string; subpath?: string; embed?: boolean }): string {
+    return `${link.embed ? "!" : ""}[[${link.target}${link.subpath ? `#${link.subpath}` : ""}]]`;
 }
 
 /** Turn the errors a write can raise into something a model can act on. */
@@ -256,20 +262,31 @@ function describe(receipt: WriteReceipt, what: string): string {
 }
 
 /**
- * What a delete did, said in a way that does not imply an undo.
+ * What a delete did, and what can still be done about it.
  *
  * `describe` would report zero chunks written and zero reused, which for a
  * deletion reads as though something went wrong. What matters instead is that
- * the note is gone from every device, that a tombstone is what made that
- * happen, and that this server has no way to put the text back.
+ * the note is gone from every device, and that a tombstone is what made that
+ * happen.
+ *
+ * Whether the undo exists is asked of the registrations rather than stated,
+ * because this sentence used to say that restoring the text was not something
+ * this server could do, and went on saying it after `restore_note` was built to
+ * do exactly that. That is worse than an out-of-date sentence elsewhere: a
+ * model reading it will not offer the undo, so the tool that exists to make a
+ * delete recoverable is invisible at the one moment it is wanted.
  */
-function describeDeletion(receipt: WriteReceipt): string {
+function describeDeletion(receipt: WriteReceipt, canRestore: boolean): string {
     return (
         `Deleted "${receipt.path}".\n` +
         `Revision ${receipt.rev}, ${receipt.size.toLocaleString()} bytes removed. Marked deleted ` +
         `rather than erased, which is how the sync plugin does it: every device removes its copy ` +
-        `on the next sync and the document stays behind as the record of that. Restoring the text ` +
-        `is not something this server can do.` +
+        `on the next sync and the document stays behind as the record of that. ` +
+        (canRestore
+            ? `That record is also what makes this reversible: restore_note reads the text back ` +
+              `out of it. Not forever, though. The sync plugin eventually collects the pieces no ` +
+              `live note refers to, and after that the note is gone for good.`
+            : `Restoring the text is not something this server can do.`) +
         (receipt.replicaPatchError ? `\n\nNote: ${receipt.replicaPatchError}` : "")
     );
 }
@@ -355,7 +372,8 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): stri
                 .optional()
                 .describe(
                     "Placed between the existing content and the new text when there is already " +
-                        "content to follow. Defaults to a blank line."
+                        "content to follow. Defaults to a blank line, or to a single newline when " +
+                        "a list item is being added to a list, so the list is not split in two."
                 ),
         }),
         execute: async ({ path, content, heading, separator }, { session }) =>
@@ -405,7 +423,8 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): stri
                 .string()
                 .optional()
                 .describe(
-                    "Placed before the new text when there is already content. Defaults to a blank line."
+                    "Placed before the new text when there is already content. Defaults to a blank " +
+                        "line, or to a single newline when a list item is being added to a list."
                 ),
         }),
         execute: async ({ content, heading, date, separator }, { session }) =>
@@ -539,9 +558,9 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): stri
             "Delete a note from the Obsidian vault. Use this for a note that should not exist: " +
             "one created here by mistake, or a draft that has been folded into another note. The " +
             "note is marked deleted, the way the sync plugin does it, so every device removes its " +
-            "copy on the next sync. This cannot be undone through this server, and the vault is " +
-            "the user's own record, so read the note first and say what is being removed rather " +
-            "than deleting on an assumption.",
+            "copy on the next sync. restore_note can usually bring it back afterwards, but not " +
+            "always and not forever, and the vault is the user's own record, so read the note " +
+            "first and say what is being removed rather than deleting on an assumption.",
         parameters: z.object({
             path: z.string().describe("Vault-relative path including the .md extension."),
         }),
@@ -572,7 +591,8 @@ export function registerWriteTools(server: FastMCP, ctx: WriteToolContext): stri
                 }
 
                 const receipt = await ctx.executor.remove({ path, expectedRev: current.rev });
-                return describeDeletion(receipt);
+                // Asked of the list the registrations built, not assumed.
+                return describeDeletion(receipt, registered.includes("restore_note"));
             }),
     });
 
@@ -845,7 +865,7 @@ function appended(
     // A note that does not end in a newline would otherwise have the appended
     // text run onto its last line, which is almost never what someone
     // appending a line meant.
-    const joiner = existing.length === 0 ? "" : (separator ?? "\n\n");
+    const joiner = existing.length === 0 ? "" : (separator ?? defaultSeparator(existing, content));
     const text = existing.length === 0 ? content : `${trimTrailingNewline(existing)}${joiner}${content}`;
     return { text, where: "" };
 }

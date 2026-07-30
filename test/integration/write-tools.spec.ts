@@ -328,7 +328,7 @@ describe("append_note", () => {
     it("appends to an existing note without disturbing what is there", async () => {
         await call("append_note", { path: "daily/2026-07-28.md", content: "- [ ] another task" });
 
-        expect(await inVault("daily/2026-07-28.md")).toBe("# Today\n\n- [ ] a task\n\n- [ ] another task");
+        expect(await inVault("daily/2026-07-28.md")).toBe("# Today\n\n- [ ] a task\n- [ ] another task");
     });
 
     it("creates the note when it does not exist", async () => {
@@ -454,7 +454,7 @@ describe("appending under a heading", () => {
         });
 
         expect(await inVault("notes/structured.md")).toBe(
-            "# Meeting\n\n## Actions\n\n- one\n\n- two\n\n## Attendees\n\n- Chris\n"
+            "# Meeting\n\n## Actions\n\n- one\n- two\n\n## Attendees\n\n- Chris\n"
         );
     });
 
@@ -491,7 +491,7 @@ describe("append_daily", () => {
         await call("append_daily", { content: "- got dressed", date: "2026-07-27", heading: "Log" });
 
         const text = await inVault("daily/2026-07-27.md");
-        expect(text).toContain("- got up\n\n- got dressed\n\n## Notes");
+        expect(text).toContain("- got up\n- got dressed\n\n## Notes");
     });
 
     it("creates the day's note when there is not one yet", async () => {
@@ -966,6 +966,21 @@ describe("renaming a tag across the vault", () => {
 });
 
 describe("bringing a deleted note back", () => {
+    it("tells you the undo exists, in the message that used to deny it", async () => {
+        // The sentence said restoring was not something this server could do,
+        // and went on saying it after restore_note was built. Worse than an
+        // out-of-date string elsewhere: it steers a model away from the tool
+        // that exists for exactly this moment. Composed from the registrations
+        // now, and asserted here rather than trusted.
+        await call("create_note", { path: "notes/short-lived.md", content: "Here briefly.\n" });
+        const out = await call("delete_note", { path: "notes/short-lived.md" });
+
+        expect(out).toContain("restore_note");
+        expect(out).not.toContain("not something this server can do");
+        await call("restore_note", { path: "notes/short-lived.md" });
+        await call("delete_note", { path: "notes/short-lived.md" });
+    }, 60_000);
+
     it("restores it byte for byte from the deletion record", async () => {
         const before = await inVault("notes/repeated.md");
         await call("delete_note", { path: "notes/repeated.md" });

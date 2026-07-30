@@ -17,7 +17,6 @@ describe("appendUnderHeading", () => {
                 "## Log",
                 "",
                 "- woke up",
-                "",
                 "- had lunch",
                 "",
                 "## Reflections",
@@ -53,12 +52,14 @@ describe("appendUnderHeading", () => {
         const { text } = appendUnderHeading(note, "Log", "- three");
 
         // After the subsection, because a subsection belongs to its parent.
-        expect(text).toContain("- two\n\n- three\n\n## Other");
+        expect(text).toContain("- two\n- three\n\n## Other");
     });
 
     it("appends to a section that runs to the end of the note", () => {
         const { text } = appendUnderHeading("## Log\n\n- one\n", "Log", "- two");
-        expect(text).toBe("## Log\n\n- one\n\n- two\n");
+        // One newline, not two: a blank line between list items ends the list
+        // and starts another, which renders as two lists with a gap.
+        expect(text).toBe("## Log\n\n- one\n- two\n");
     });
 
     it("puts the first entry directly under an empty heading", () => {
@@ -92,7 +93,7 @@ describe("appendUnderHeading", () => {
         const { text } = appendUnderHeading(note, "Log", "- two");
 
         expect(text.startsWith("---\n# Log\ntags: [x]\n---\n")).toBe(true);
-        expect(text).toBe("---\n# Log\ntags: [x]\n---\n\n## Log\n\n- one\n\n- two\n");
+        expect(text).toBe("---\n# Log\ntags: [x]\n---\n\n## Log\n\n- one\n- two\n");
     });
 
     it("ignores headings inside fenced code", () => {
@@ -108,7 +109,7 @@ describe("appendUnderHeading", () => {
     it("matches case-insensitively when nothing matches exactly", () => {
         const { text, headingCreated } = appendUnderHeading("## log\n\n- one\n", "Log", "- two");
         expect(headingCreated).toBe(false);
-        expect(text).toBe("## log\n\n- one\n\n- two\n");
+        expect(text).toBe("## log\n\n- one\n- two\n");
     });
 
     it("prefers an exact match over a differently cased one", () => {
@@ -122,6 +123,27 @@ describe("appendUnderHeading", () => {
         expect(() => appendUnderHeading(note, "Log", "c")).toThrow(AmbiguousHeadingError);
     });
 
+    it("keeps the blank line when what follows a list is not a list item", () => {
+        // The rule is about joining a list, not about lists in general. A
+        // paragraph after one is a paragraph and needs the gap.
+        const { text } = appendUnderHeading("## Log\n\n- one\n", "Log", "And a closing thought.");
+        expect(text).toBe("## Log\n\n- one\n\nAnd a closing thought.\n");
+    });
+
+    it("keeps the blank line when a list starts after a paragraph", () => {
+        const { text } = appendUnderHeading("## Log\n\nSome prose.\n", "Log", "- one");
+        expect(text).toBe("## Log\n\nSome prose.\n\n- one\n");
+    });
+
+    it("joins a numbered list too, and one that is indented", () => {
+        expect(appendUnderHeading("## Log\n\n1. one\n", "Log", "2. two").text).toBe(
+            "## Log\n\n1. one\n2. two\n"
+        );
+        expect(appendUnderHeading("## Log\n\n- one\n", "Log", "  - nested").text).toBe(
+            "## Log\n\n- one\n  - nested\n"
+        );
+    });
+
     it("honours a custom separator", () => {
         const { text } = appendUnderHeading("## Log\n\n- one\n", "Log", "- two", { separator: "\n" });
         expect(text).toBe("## Log\n\n- one\n- two\n");
@@ -130,13 +152,13 @@ describe("appendUnderHeading", () => {
     it("keeps the note's line endings", () => {
         const note = "## Log\r\n\r\n- one\r\n\r\n## Next\r\n";
         const { text } = appendUnderHeading(note, "Log", "- two");
-        expect(text).toBe("## Log\r\n\r\n- one\r\n\r\n- two\r\n\r\n## Next\r\n");
+        expect(text).toBe("## Log\r\n\r\n- one\r\n- two\r\n\r\n## Next\r\n");
         expect(text).not.toMatch(/[^\r]\n/);
     });
 
     it("accepts a heading given with its hashes", () => {
         const { text, headingCreated } = appendUnderHeading("## Log\n\n- one\n", "## Log", "- two");
         expect(headingCreated).toBe(false);
-        expect(text).toBe("## Log\n\n- one\n\n- two\n");
+        expect(text).toBe("## Log\n\n- one\n- two\n");
     });
 });

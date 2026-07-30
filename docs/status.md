@@ -19,7 +19,7 @@ work.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 744 tests, ~90s
+npm test          # 749 tests, ~90s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -362,6 +362,15 @@ revision back out of CouchDB after a transcription is saved.
     several notes, a plan composed from a read that went stale while planning,
     and two captures into a fresh daily note.
 
+    Exercised separately through the connector on the evening of 30 July 2026,
+    against the same database. Not the gate, which is `verify:write` and stays
+    the thing that proves documents reach CouchDB intact, but the other half of
+    the question: the tools as a model meets them, over OAuth, chosen from their
+    own descriptions. It covered what the script deliberately does not, which is
+    the wording. Every operation behaved, and three messages turned out to
+    describe the server as it was rather than as it is. See
+    `docs/acceptance-connector-2026-07-30.md`; all three are fixed.
+
     Re-run again on 30 July 2026 for the move path, and confirmed in Obsidian:
     a move that sent no chunks at all, a refusal to move onto an occupied path
     with the occupant untouched, a copy, and a rename committed in one plan
@@ -460,6 +469,13 @@ has the detail. Switch one is done and is meant to be lived with.
       `vault_status` says whether it is attached. See "The index feed" above.
 - [ ] `get_attachment` refuses an attachment over `ATTACHMENT_SIZE_CAP` but will
       still serve a stored transcription for it. Untested; add one.
+- [ ] Set `DAILY_NOTE_PATH` on the writetest environment. That database holds one
+      dated filename and inference needs two, so `append_daily` is the only tool
+      on the write surface that cannot be exercised there, which makes it the one
+      thing first exercised against `obsidiandb`.
+- [ ] A path with literal quote characters, `"mcp-write-check/from-a-client.md"`,
+      is sitting in the vault, sorting above everything else. Harmless where it
+      is. Worth following up only because a document ID here is a vault path.
 - [ ] E2EE is not enabled on the vault. The code handles it and the differential
       tests cover it, but no real encrypted vault has been read.
 - [x] **Rotate the CouchDB `obsidian` password.** Done 30 July 2026. It had been
@@ -693,6 +709,40 @@ server with `READ_ONLY=false`.
   generalises past this bug. `NoteNotFoundError` means "nothing to read here",
   which is not the same claim as "nothing is here", and any code that treats the
   first as the second is one deleted note away from being wrong.
+- **Every sentence this server says about itself has to be computed from the
+  thing it describes, and the ones that steer are the ones that hurt.** Three
+  instances in three days, which is a pattern rather than a run of bad luck: the
+  instructions string that said the server was read-only, the startup warning
+  that listed six of seven tools, and `delete_note` telling every caller that
+  restoring the text was not something this server could do. The third was found
+  by the connector acceptance pass, thirty seconds after `restore_note` had done
+  exactly that. It is the worst of the three, because the other two describe a
+  capability wrongly and this one tells a model not to try: the tool built so
+  that a delete is not final was invisible at the only moment it mattered. There
+  was a fourth, added the same day this rule was written down, in the
+  instructions this file congratulates itself about above. Composed from the
+  registrations now, all of them, with a test each.
+- **A count that disagrees with the tool it recommends is a count nobody
+  believes.** `move_file` refused a rename over "1 link", and `plan_move`, on the
+  identical operation, rewrote 2: `resolutionImpact` selected `DISTINCT
+  source_path, target`, which collapses `[[note]]` and `![[note#Section]]`
+  because they share a target. The check was never wrong, since resolution reads
+  the target and nothing else, so the collapse could only ever undercount a
+  report. But the count is in the message that decides whether anyone reaches
+  for the plan path, and the difference between one and two is the difference
+  between "I will fix that link myself" and "I had better use the tool".
+- **A default that is right for prose can be wrong for the case the tool
+  advertises first.** `append_note` separated with a blank line whatever it was
+  separating, so adding a list item to a list ended the list and started a
+  second one, rendering with a gap. The tool description's own first example is
+  "a line to a running list". The separator now looks at whether the line before
+  and the text after are both list items.
+- **The vault's day is not the container's day, in both directions.** The note on
+  `VAULT_TIMEZONE` covers the container being ten hours behind Brisbane. The
+  consequence the other way is that after 14:00 UTC a capture files under
+  tomorrow's daily note, correctly, while every clock the operator is looking at
+  still says today. Confirmed on 30 July 2026: `append_daily` at 15:59 UTC
+  created `2026/07/31.md`.
 - **A client asks for its scopes once, so the challenge is the whole
   negotiation.** The 401's `scope` said `vault:read`, correctly describing the
   minimum that request needed, and that is what Claude asked Pocket-ID for. The
