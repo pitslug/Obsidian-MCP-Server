@@ -19,7 +19,7 @@ work.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 769 tests, ~90s
+npm test          # 771 tests, ~90s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -479,10 +479,15 @@ machines. Rough priority order within each group.
       renaming and copying" above. OneNote parity on this point is now met for
       one file at a time; a folder is still many files, which is the batch case
       below.
-- [ ] **Batch move and rename by selector.** The obvious next plan operations,
-      and deliberately not built yet: the single-file behaviour has to be right
-      before it is multiplied by forty. Moving a folder is this wearing a
-      different hat and should use a selector rather than a tool of its own.
+- [ ] **Batch move and rename by selector.** Designed 31 July 2026, to
+      `docs/batch-move-design.md`, and not built: three open questions in it are
+      Chris's rather than the code's. The measurement that decides the shape is
+      that asking about forty moves one at a time gives the wrong answer, since
+      `resolutionImpact` builds an "after" view in which only the one file
+      moved. Two files of the same name relocating together produce three
+      different answers that way, and the only one that matters is the one
+      nobody asked for. So the batch check is not a loop over the single-file
+      check; it needs the whole set applied to one view.
 - [ ] **Decide whether OneNote ink or its transcription is the source of truth.**
       OneNote treats handwriting as first class (`get_page_ink`,
       `render_page_ink`). Here a handwritten page arrives as an image or PDF
@@ -545,8 +550,14 @@ has the detail. Switch one is done and is meant to be lived with.
 - [x] **The index changes feed restarts itself.** 30 July 2026. Backoff from a
       second to a minute, resuming from the last sequence applied, and
       `vault_status` says whether it is attached. See "The index feed" above.
-- [ ] `get_attachment` refuses an attachment over `ATTACHMENT_SIZE_CAP` but will
-      still serve a stored transcription for it. Untested; add one.
+- [x] `get_attachment` refuses an attachment over `ATTACHMENT_SIZE_CAP` but will
+      still serve a stored transcription for it. Tested 31 July 2026, in
+      `test/integration/tools.spec.ts`, which now runs its server with an
+      8 KiB cap and one 20 KiB fixture rather than seeding a real 25 MiB file.
+      Both halves are asserted: no image part comes back, so the refusal
+      happens before the bytes are encoded rather than after, and the stored
+      transcription is served anyway, because the cap is about shipping bytes
+      and not about withholding text.
 - [x] Set `DAILY_NOTE_PATH` on the writetest environment. Done 31 July 2026, to
       `Daily/YYYY-MM-DD.md`, which is also the convention the vault is adopting.
       `append_daily` says the template came from the variable rather than from

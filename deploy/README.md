@@ -70,16 +70,20 @@ Nothing here holds an OAuth credential.
     `read:packages`. That works and changes nothing in the compose file; it is
     one more credential to keep track of.
 
-    The compose file pulls `:edge`, which is whatever is on `main`. Once the
-    work is settled, tag a release and pin to it:
+    The compose file pulls `:0.1` rather than `:edge`, which would be whatever
+    is on `main`. This service holds transcriptions nothing can recompute, and
+    the stack pins stateful services for exactly that reason.
+
+    Tagging a release produces `:0.1.7`, `:0.1`, `:0` and `:latest`, so the
+    `:0.1` tag moves and a deployment is two commands:
 
     ```bash
-    git tag v0.1.0 && git push --tags
+    git tag -a v0.1.7 -m "..." && git push origin v0.1.7        # here
+    docker compose pull obsidian-mcp && docker compose up -d obsidian-mcp  # on the server
     ```
 
-    That produces `:0.1.0`, `:0.1`, `:0` and `:latest`. Pin to `:0.1` in the
-    compose file: this service holds transcriptions nothing can recompute, and
-    the stack pins stateful services for exactly that reason.
+    Nothing in the container reports its own version, so confirm the pull
+    rather than assuming it.
 
 2. Create the data directory and the secret:
 

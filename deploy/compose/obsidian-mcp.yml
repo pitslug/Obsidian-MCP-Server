@@ -7,10 +7,11 @@ services:
     # onenote-mcp. Comment `image:` and uncomment `build:` to build locally
     # from a checkout instead.
     #
-    # :edge is whatever is on main. Move to a pinned :0.1 once v0.1.0 is
-    # tagged: this service holds transcripts that nothing can recompute, which
-    # is the stack's own reason for pinning stateful services.
-    image: ghcr.io/pitslug/obsidian-mcp-server:edge
+    # Pinned to :0.1 rather than :edge, which is whatever is on main: this
+    # service holds transcripts that nothing can recompute, which is the
+    # stack's own reason for pinning stateful services. The tag moves as 0.1.x
+    # releases are tagged, so a `docker compose pull` is what deploys one.
+    image: ghcr.io/pitslug/obsidian-mcp-server:0.1
     # build:
     #   context: $OBSIDIAN_MCP_SRC            # checkout of pitslug/Obsidian-MCP-Server
     #   dockerfile: Dockerfile

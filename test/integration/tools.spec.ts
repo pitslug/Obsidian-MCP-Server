@@ -34,6 +34,10 @@ const NOTE = "# Today\n\n- [ ] a task\n\nSome body text.\n";
 const BIG = "project body\n".repeat(400);
 /** A page of ink from a handwriting plugin: a real PDF with no text in it. */
 const INK = "Ink/2026-07-20 board.pdf";
+/** An attachment past the retrieval cap, to check what happens at the edge. */
+const OVERSIZED = "attachments/oversized-scan.png";
+/** The cap this server runs with, low enough to reach with a 20 KiB fixture. */
+const SIZE_CAP = 8192;
 
 let couch: FakeCouch;
 let replicaDir: string;
@@ -90,6 +94,10 @@ beforeAll(async () => {
         ["daily/2026-07-28.md", { kind: "text", text: NOTE }],
         ["projects/big.md", { kind: "text", text: BIG }],
         ["attachments/image.png", { kind: "binary", bytes: new Uint8Array(3000).fill(7) }],
+        // Over ATTACHMENT_SIZE_CAP, which this server sets low so that the cap
+        // can be reached without seeding a real 25 MiB file. Everything else
+        // here is under 3 KiB, so nothing else is affected by the cap.
+        [OVERSIZED, { kind: "binary", bytes: new Uint8Array(20 * 1024).fill(9) }],
         [INK, { kind: "binary", bytes: pdfWithoutText() }],
         // A PDF that does carry a text layer, so the tools can be shown to tell
         // the two apart rather than treating every PDF as needing a human.
@@ -150,6 +158,7 @@ beforeAll(async () => {
             // container path a deployment uses.
             INDEX_PATH: join(replicaDir, "index.sqlite"),
             TRANSCRIPT_PATH: join(replicaDir, "transcripts.sqlite"),
+            ATTACHMENT_SIZE_CAP: String(SIZE_CAP),
             LOG_LEVEL: "error",
         },
         stderr: "pipe",
@@ -450,6 +459,41 @@ describe("get_attachment", () => {
         );
         expect(text).toMatch(/No note at "nope.pdf"/);
     });
+
+    it("refuses one over the size cap, with both numbers in the refusal", async () => {
+        const result = (await client.callTool({
+            name: "get_attachment",
+            arguments: { path: OVERSIZED },
+        })) as { content: { type: string }[] };
+
+        // No bytes, which is the whole point of a cap: an image branch that ran
+        // first would have base64-encoded the file before deciding not to send
+        // it, and a caller would see the refusal after paying for it.
+        expect(result.content.some((part) => part.type === "image")).toBe(false);
+
+        const text = textOf(result);
+        expect(text).toContain(OVERSIZED);
+        expect(text).toContain("20.0 KiB");
+        expect(text).toContain("8.0 KiB");
+    });
+
+    it("still hands over a stored transcription for one it will not send", async () => {
+        // The cap is about shipping bytes, not about withholding text. A
+        // handwritten page too large to retrieve has already been read once,
+        // and refusing to repeat what it said would make the transcription
+        // unreachable through the tool that led anybody to the file.
+        const reading = "Site notes, Adelaide: the switchboard is on the north wall.";
+        await client.callTool({
+            name: "save_transcription",
+            arguments: { path: OVERSIZED, text: reading, provenance: "test" },
+        });
+
+        const text = textOf(
+            await client.callTool({ name: "get_attachment", arguments: { path: OVERSIZED } })
+        );
+        expect(text).toContain("above the");
+        expect(text).toContain(reading);
+    });
 });
 
 /**
@@ -521,7 +565,10 @@ describe("transcription", () => {
         // A PDF with a real text layer is already searchable; asking a model to
         // read it would be paying twice for what extraction did for free.
         expect(text).not.toContain("attachments/typed.pdf");
-        expect(text).toMatch(/2 of 3 attachment\(s\) have no searchable text/);
+        // Four attachments now, not three: the oversized one is in the vault
+        // too, and an earlier test stored a reading for it, so it is counted
+        // and not listed.
+        expect(text).toMatch(/2 of 4 attachment\(s\) have no searchable text/);
         expect(text).toMatch(/save_transcription/);
     });
 
@@ -577,7 +624,7 @@ describe("transcription", () => {
         // error string, on an empty result, and on a false all-clear, none of
         // which is the behaviour being claimed.
         expect(text).toContain("attachments/image.png");
-        expect(text).toMatch(/1 of 3 attachment\(s\) have no searchable text/);
+        expect(text).toMatch(/1 of 4 attachment\(s\) have no searchable text/);
     });
 
     it("serves the transcription afterwards, instead of the apology", async () => {
