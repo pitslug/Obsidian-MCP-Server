@@ -247,6 +247,9 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     // Filled by the write registrations below, and read at call time by
     // vault_status. One list, two readers, no sentence restating it.
     const writableTools: string[] = [];
+    // The same, for the tools that compose a change and write nothing. A second
+    // list rather than a second sentence, for the same reason.
+    const planningTools: string[] = [];
 
     const toolContext = {
         replicator,
@@ -257,6 +260,7 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
         attachmentSizeCap: config.attachmentSizeCap,
         transcripts,
         writableTools: () => writableTools,
+        planningTools: () => planningTools,
         conventions,
         indexFeedAttached: () => builder.feedAttached,
     };
@@ -296,6 +300,7 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
     });
 
     if (!config.readOnly) {
+        const planTools = registerPlanTools(server, { reader, index, executor });
         writableTools.push(
             ...registerWriteTools(server, {
                 reader,
@@ -304,8 +309,9 @@ export async function start(config: Config = loadConfig()): Promise<RunningServe
                 dailyNotePath: config.dailyNotePath,
                 timeZone: config.timeZone,
             }),
-            ...registerPlanTools(server, { reader, index, executor })
+            ...planTools.mutating
         );
+        planningTools.push(...planTools.planning);
         // Named from the registrations, never from a list written here. The
         // previous version of this line said "Six tools" and listed them, and
         // stayed that way through the arrival of a seventh: a warning that

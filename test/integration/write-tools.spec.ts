@@ -263,12 +263,29 @@ describe("the write surface", () => {
 
     it("names every one of them in vault_status", async () => {
         const out = await call("vault_status", {});
+        const writes = out.split("\n").find((line) => line.startsWith("Writes:")) ?? "";
 
-        expect(out).toContain("Writes: enabled");
-        for (const name of MUTATING_TOOLS) expect(out).toContain(name);
+        expect(writes).toContain("enabled");
+        for (const name of MUTATING_TOOLS) expect(writes).toContain(name);
 
-        // The two that cannot write should not be listed as though they could.
-        expect(out).not.toContain("discard_plan");
+        // The ones that cannot write are not listed as though they could.
+        expect(writes).not.toContain("discard_plan");
+        expect(writes).not.toContain("plan_move");
+    });
+
+    it("names the planning tools too, on their own line", async () => {
+        // Omitting them was defensible and still wrong. The line is what a
+        // reader consults to find out what this server can do, and it listed
+        // commit_plan with nothing that could produce a plan for it to commit,
+        // while move_file's own refusal sent people to plan_move, a tool this
+        // answer implied did not exist.
+        const out = await call("vault_status", {});
+        const plans = out.split("\n").find((line) => line.startsWith("Plans:")) ?? "";
+
+        for (const name of ["plan_move", "plan_retag", "plan_set_properties", "discard_plan"]) {
+            expect(plans).toContain(name);
+        }
+        expect(plans).toContain("write nothing");
     });
 
     it("names every one of them in the startup warning too", async () => {
@@ -851,6 +868,15 @@ describe("planning a rename", () => {
 
         expect(plan).toContain("links/archive/filed.md -> links/archive/minutes.md");
         expect(plan).toContain("links/hub.md: rewrites 3 link(s)");
+
+        // What a plan is for. Until 31 July 2026 it stopped at the count above,
+        // so the one question a rename plan exists to answer, what the links
+        // will say afterwards, was the one it did not answer, while the refusal
+        // that sends people here listed every link in full.
+        expect(plan).toContain("[[filed]] -> [[minutes]]");
+        expect(plan).toContain("![[filed#Detail]] -> ![[minutes#Detail]]");
+        expect(plan).toContain("[[filed|the note]] -> [[minutes|the note]]");
+
         // Nothing yet, which is the point of a plan.
         expect(await inVault("links/archive/minutes.md")).toBeUndefined();
 

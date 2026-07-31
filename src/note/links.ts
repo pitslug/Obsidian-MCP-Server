@@ -47,11 +47,29 @@ export interface LinkRewrite {
     text: string;
     /** How many links were rewritten. */
     changed: number;
+    /**
+     * Each rewrite as the note has it and as the note will have it.
+     *
+     * A count is not a message. `plan_move` printed "rewrites 7 link(s)" and
+     * nothing else, so the one question a rename plan exists to answer, what
+     * the links will say afterwards, was the one it did not answer, while the
+     * refusal that sends people to `plan_move` listed every link in full.
+     * Found on 31 July 2026 by the connector pass that read the messages.
+     */
+    rewrites: { before: string; after: string }[];
 }
 
 /** The last path segment. */
 function basename(path: string): string {
     return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/** A path with its last extension removed, or undefined when it has none. */
+function withoutExtension(path: string): string | undefined {
+    const name = basename(path);
+    const dot = name.lastIndexOf(".");
+    if (dot <= 0) return undefined;
+    return path.slice(0, path.length - (name.length - dot));
 }
 
 /**
@@ -60,17 +78,21 @@ function basename(path: string): string {
  * The two questions are whether the link spelled out the extension and whether
  * it spelled out any folders, because those are the two things Obsidian lets a
  * link leave out and the two the new text has to leave out in the same way.
+ *
+ * Any extension, not only `.md`. That was the rule until 31 July 2026, and it
+ * was right while `[[Peter Litzow]]` resolved to nothing: an omitted extension
+ * could only mean a note. Now that it resolves to the PDF, answering it with
+ * `[[Pete Litzow.pdf]]` writes a style into somebody's note that they did not
+ * ask for, once per rename, forever.
  */
 export function retarget(oldTarget: string, from: string, to: string): string {
     const lower = (value: string) => value.toLowerCase();
-    // Only `.md` can be omitted, so an omitted extension means the file is a
-    // note and the new target has to drop it again.
     const spelledOutExtension =
         lower(from) === lower(oldTarget) || lower(from).endsWith(`/${lower(oldTarget)}`);
 
     const next = oldTarget.includes("/") ? to : basename(to);
-    if (!spelledOutExtension && lower(next).endsWith(".md")) return next.slice(0, -3);
-    return next;
+    if (spelledOutExtension) return next;
+    return withoutExtension(next) ?? next;
 }
 
 /**
@@ -87,10 +109,17 @@ export function retarget(oldTarget: string, from: string, to: string): string {
  * path is used when the short form no longer lands on the right file. Longer
  * than Obsidian would have written, and correct, which is the right way round
  * for a link nobody is going to re-read.
+ *
+ * The first candidate is the text the link already has, because a move that
+ * changes only the folder does not change what a basename means and there is
+ * then nothing to rewrite. That is also what leaves somebody's capitalisation
+ * alone: `[[peter litzow]]` still resolves after the file is filed elsewhere,
+ * so it stays as they typed it, and only a rename, which no spelling of the old
+ * name survives, replaces their text with the vault's.
  */
 export function retargetWithin(oldTarget: string, from: string, to: string, paths: Iterable<string>): string {
     const all = [...paths];
-    const candidates = [retarget(oldTarget, from, to)];
+    const candidates = [oldTarget, retarget(oldTarget, from, to)];
     if (to.toLowerCase().endsWith(".md")) candidates.push(to.slice(0, -3));
     candidates.push(to);
 
@@ -122,7 +151,7 @@ export function rewriteLinkTargets(
     options: { from: string; to: string; targets: readonly string[]; paths?: Iterable<string> }
 ): LinkRewrite {
     const wanted = new Set(options.targets);
-    if (wanted.size === 0) return { text, changed: 0 };
+    if (wanted.size === 0) return { text, changed: 0, rewrites: [] };
 
     // Given the vault's paths, the new target is checked rather than assumed.
     // Without them this is the shortest form that would have been right in a
@@ -134,7 +163,13 @@ export function rewriteLinkTargets(
             : retargetWithin(target, options.from, options.to, paths);
 
     const masked = maskForRewriting(text);
-    const edits: { start: number; end: number; replacement: string }[] = [];
+    const edits: {
+        start: number;
+        end: number;
+        replacement: string;
+        before: string;
+        after: string;
+    }[] = [];
 
     for (const match of masked.matchAll(WIKILINK)) {
         const at = match.index ?? 0;
@@ -156,11 +191,16 @@ export function rewriteLinkTargets(
         const leading = rawTarget.slice(0, rawTarget.length - rawTarget.trimStart().length);
         const trailing = rawTarget.slice(rawTarget.trimEnd().length);
         const replacement = `${leading}${nextFor(target)}${trailing}${subpath}${alias}`;
+        if (replacement === inner) continue;
 
+        const start = at + (match[1] ?? "").length + 2;
+        const end = at + match[0].length - 2;
         edits.push({
-            start: at + (match[1] ?? "").length + 2,
-            end: at + match[0].length - 2,
+            start,
+            end,
             replacement,
+            before: text.slice(at, at + match[0].length),
+            after: text.slice(at, start) + replacement + text.slice(end, at + match[0].length),
         });
     }
 
@@ -183,21 +223,33 @@ export function rewriteLinkTargets(
         if (!wanted.has(decoded)) continue;
 
         const next = forMarkdown(nextFor(decoded));
+        const replacement = fragment.length > 0 ? `${next}#${fragment.join("#")}` : next;
+        if (replacement === raw) continue;
+
+        const whole = match[0];
+        const from = match.index ?? 0;
         edits.push({
             start: at,
             end: at + raw.length,
-            replacement: fragment.length > 0 ? `${next}#${fragment.join("#")}` : next,
+            replacement,
+            before: text.slice(from, from + whole.length),
+            after: text.slice(from, at) + replacement + text.slice(at + raw.length, from + whole.length),
         });
     }
 
-    if (edits.length === 0) return { text, changed: 0 };
+    if (edits.length === 0) return { text, changed: 0, rewrites: [] };
 
-    // Applied back to front, so an earlier edit does not move a later one.
+    // Reported in the order somebody reads the note, and applied back to front
+    // so an earlier edit does not move a later one.
+    const rewrites = [...edits]
+        .sort((a, b) => a.start - b.start)
+        .map(({ before, after }) => ({ before, after }));
+
     edits.sort((a, b) => b.start - a.start);
     let out = text;
     for (const edit of edits) {
         out = out.slice(0, edit.start) + edit.replacement + out.slice(edit.end);
     }
 
-    return { text: out, changed: edits.length };
+    return { text: out, changed: edits.length, rewrites };
 }

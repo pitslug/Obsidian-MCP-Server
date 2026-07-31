@@ -18,6 +18,7 @@ import type { FastMCP } from "fastmcp";
 import type { VaultIndex } from "../index/index.js";
 import type { VaultReader } from "../vault/reader.js";
 import { confirmLive, staleness, type ConfirmContext } from "./confirm.js";
+import { renderWikilink } from "../note/links.js";
 
 export interface SearchToolContext extends ConfirmContext {
     index: VaultIndex;
@@ -224,6 +225,11 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
                 );
             }
 
+            // Both directions print the link as the note has it. Printing only
+            // where it landed answered a question nobody asks: somebody reading
+            // links before a rename wants to know which words they would have
+            // to change, and a note naming one file three ways came back as the
+            // same path three times, ordered by a target text never shown.
             if (which === "outgoing" || which === "both") {
                 const links = ctx.index.outgoingLinks(path);
                 sections.push(`Links from ${path} (${links.length}):`);
@@ -231,27 +237,22 @@ export function registerSearchTools(server: FastMCP, ctx: SearchToolContext): vo
                     sections.push("  none");
                 } else {
                     for (const link of links) {
-                        const marks = [
-                            link.embed ? "embed" : "",
-                            link.subpath ? `#${link.subpath}` : "",
-                            link.resolvedPath ? "" : "UNRESOLVED",
-                        ].filter(Boolean);
-                        sections.push(
-                            `  ${link.resolvedPath ?? link.target}` +
-                                (marks.length ? `  [${marks.join(", ")}]` : "")
-                        );
+                        sections.push(`  ${renderWikilink(link)} -> ${link.resolvedPath ?? "UNRESOLVED"}`);
                     }
                 }
             }
 
             if (which === "backlinks" || which === "both") {
                 const { rows: back } = await confirmLive(ctx, ctx.index.backlinks(path), (link) => link.path);
-                sections.push("", `Links to ${path} (${back.length}):`);
+                // The blank line separates two sections, so it belongs to the
+                // second only when there was a first.
+                if (which === "both") sections.push("");
+                sections.push(`Links to ${path} (${back.length}):`);
                 if (back.length === 0) {
                     sections.push("  none");
                 } else {
                     for (const link of back) {
-                        sections.push(`  ${link.path}${link.embed ? "  [embed]" : ""}`);
+                        sections.push(`  ${link.path}: ${renderWikilink(link)}`);
                     }
                 }
             }

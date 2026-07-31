@@ -19,7 +19,7 @@ work.
 git clone https://github.com/pitslug/Obsidian-MCP-Server.git
 cd Obsidian-MCP-Server
 npm install
-npm test          # 764 tests, ~90s
+npm test          # 769 tests, ~90s
 ```
 
 Node 22 or later. Nothing else is needed to run the suite: it stands up its own
@@ -248,6 +248,39 @@ from re-resolving every link in the vault: a link whose target is not one of the
 names of the old path or the new one cannot change meaning. It strips any
 extension now rather than only `.md`, which is the half that had been missing.
 
+### What a link is worth saying about
+
+The connector pass that checked the rewrite above found nothing wrong with what
+any tool did and four things wrong with what they said, all of them the same
+thing: the code knew which link it meant and the message did not print it. Fixed
+31 July 2026, to `docs/links-check-2026-07-31.md`.
+
+`plan_move` reported "rewrites 7 link(s)" and stopped, so the only question a
+rename plan exists to answer went unanswered, while `move_file`'s refusal, the
+message that sends people to `plan_move`, listed every affected link in full. It
+now prints what the text becomes, grouped by shape with a count, because a
+rename across forty notes is two or three transformations forty times over and
+one line per link is how a plan becomes a wall that gets scrolled past.
+`rewriteLinkTargets` returns each `before` and `after` for it, rendered whole,
+markers and aliases included.
+
+`note_links` printed resolved paths and never the link text, ordered by a target
+it did not show, so a note naming one file three ways came back as the same path
+three times. Both directions now print the link as the note has it. The reason to
+ask before a rename is to find out which words would have to change, and the
+words were the omission.
+
+Two smaller ones. A rewrite added an extension the writer had left off, turning
+`[[Peter Litzow]]` into `[[Peter Litzow - 2026.pdf]]`, which this release created
+rather than revealed: those links resolved to nothing before, so the rewriter
+never had to carry their style across. `retarget` drops whatever extension the
+link dropped, and `retargetWithin` now tries the existing text first, so a move
+that changes only the folder rewrites nothing at all and somebody's own
+capitalisation survives it. And `vault_status` named `commit_plan` among the
+tools that can write while listing nothing that could produce a plan for it to
+commit; the planning tools now have their own line, which is the distinction the
+old answer was protecting and the information it was withholding.
+
 ### Tagging
 
 Built 30 July 2026. `plan_retag` renames, merges or removes a tag across the
@@ -411,7 +444,11 @@ revision back out of CouchDB after a transcription is saved.
     separator fixed and `move_file`'s refusal counting correctly while still
     printing every link in a reconstructed form, so an embed lost its marker and
     its subpath. That is fixed too, and the renderer is now one function.
-    See `docs/recheck-connector-2026-07-31.md`.
+    See `docs/recheck-connector-2026-07-31.md`. Run a third time on 31 July 2026,
+    against the rewritten link resolution: seventeen link forms, every one
+    resolving the way Obsidian resolves it, and nothing wrong with what any tool
+    did. Four things wrong with what they said, all now fixed. See
+    `docs/links-check-2026-07-31.md`.
 
     Re-run again on 30 July 2026 for the move path, and confirmed in Obsidian:
     a move that sent no chunks at all, a refusal to move onto an occupied path
@@ -789,13 +826,17 @@ server with `READ_ONLY=false`.
   second one, rendering with a gap. The tool description's own first example is
   "a line to a running list". The separator now looks at whether the line before
   and the text after are both list items.
-- **A message is not tested by testing the data behind it.** Twice in two days a
-  fix landed in the value and not in the sentence: the scope challenge was right
-  in `scopes_supported` and wrong in the header a client actually reads, and the
-  link count was right in `resolutionImpact` and wrong in the list the refusal
-  printed. Both times the unit test passed, because both times it asserted the
-  data. Both were found by a pass that read the output. The rule that falls out:
-  where a message is the product, assert the message.
+- **A message is not tested by testing the data behind it.** Three times in three
+  days a fix landed in the value and not in the sentence: the scope challenge was
+  right in `scopes_supported` and wrong in the header a client actually reads;
+  the link count was right in `resolutionImpact` and wrong in the list the
+  refusal printed; and `plan_move` computed seven correct rewrites and printed
+  the number seven. Every time the unit test passed, because every time it
+  asserted the data, and every time it was a pass that read the output that
+  found it. The rule that falls out: where a message is the product, assert the
+  message. The corollary, which took the third one to see: the test that would
+  have caught it is not a better unit test, it is an assertion on the string the
+  person is handed.
 - **The vault's day is not the container's day, in both directions.** The note on
   `VAULT_TIMEZONE` covers the container being ten hours behind Brisbane. The
   consequence the other way is that after 14:00 UTC a capture files under

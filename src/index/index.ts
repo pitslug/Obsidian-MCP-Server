@@ -661,14 +661,27 @@ export class VaultIndex {
         }));
     }
 
-    backlinks(path: string): { path: string; target: string; embed: boolean }[] {
+    backlinks(path: string): { path: string; target: string; subpath: string | undefined; embed: boolean }[] {
         const rows = this.db
             .prepare(
-                `SELECT source_path, target, embed FROM links
-                 WHERE resolved_path = ? ORDER BY source_path`
+                `SELECT source_path, target, subpath, embed FROM links
+                 WHERE resolved_path = ? ORDER BY source_path, target`
             )
-            .all(path) as unknown as { source_path: string; target: string; embed: number }[];
-        return rows.map((row) => ({ path: row.source_path, target: row.target, embed: row.embed === 1 }));
+            .all(path) as unknown as {
+            source_path: string;
+            target: string;
+            subpath: string | null;
+            embed: number;
+        }[];
+        // The subpath comes back because anything printing one of these is
+        // printing a link, and a link with its section left off is a different
+        // link from the one in the note.
+        return rows.map((row) => ({
+            path: row.source_path,
+            target: row.target,
+            subpath: row.subpath ?? undefined,
+            embed: row.embed === 1,
+        }));
     }
 
     /** Links that point at nothing. Useful; also a sign of a rename gone wrong. */

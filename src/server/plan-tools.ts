@@ -199,17 +199,35 @@ async function reporting(work: () => Promise<string>): Promise<string> {
     }
 }
 
-export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string[] {
+export interface RegisteredPlanTools {
+    /** The ones that change the vault. Exactly one of them, by design. */
+    mutating: string[];
+    /**
+     * The ones that prepare a change and write nothing.
+     *
+     * Reported separately rather than not at all. Leaving them out of
+     * `vault_status` was literally right, since none of them writes, and it
+     * made that answer useless in the way that matters: it named `commit_plan`
+     * with nothing listed that could produce a plan for it, while `move_file`'s
+     * refusal sent people to `plan_move`, a tool the status line implied was
+     * not there. Found on 31 July 2026 by a connector pass.
+     */
+    planning: string[];
+}
+
+export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): RegisteredPlanTools {
     // Returned for the same reason as in write-tools.ts: nothing outside this
     // file should be keeping its own list of which tools can change the vault.
-    // Only one of these three can, which is the point of the protocol and is
-    // recorded here, next to the tool, rather than in a sentence elsewhere.
+    // Only one of these can, which is the point of the protocol and is recorded
+    // here, next to the tool, rather than in a sentence elsewhere.
     const mutating: string[] = [];
+    const planning: string[] = [];
     const addTool = <Params extends ToolParameters>(
         tool: Tool<FastMCPSessionAuth, Params>,
         options: { mutates?: boolean } = {}
     ) => {
         if (options.mutates) mutating.push(tool.name);
+        else planning.push(tool.name);
         server.addTool(tool);
     };
 
@@ -518,6 +536,12 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string
                 ];
 
                 const excluded: { path: string; reason: string }[] = [];
+                // Counted by shape rather than listed one per link. A rename
+                // across forty notes is the same two or three transformations
+                // forty times over, and printing every one is how a plan
+                // becomes a wall that gets scrolled past, which is the failure
+                // `renderPlan` is written around.
+                const shapes = new Map<string, number>();
                 for (const [note, targets] of linkingNotes(ctx.index, path)) {
                     let current;
                     try {
@@ -549,6 +573,11 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string
                         continue;
                     }
 
+                    for (const { before, after: becomes } of rewritten.rewrites) {
+                        const shape = `${before} -> ${becomes}`;
+                        shapes.set(shape, (shapes.get(shape) ?? 0) + 1);
+                    }
+
                     operations.push({
                         kind: "write",
                         path: note,
@@ -565,8 +594,10 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string
                 const stolen = impact.repoints.filter((repoint) => repoint.was !== path);
 
                 return [
-                    `Moving "${path}" to "${to}", and rewriting the ${operations.length - 1} note(s) ` +
-                        `that link to it.`,
+                    operations.length === 1
+                        ? `Moving "${path}" to "${to}". Nothing links to it, so no note changes.`
+                        : `Moving "${path}" to "${to}", and rewriting the ${operations.length - 1} ` +
+                          `note(s) that link to it.`,
                     ...(stolen.length > 0
                         ? [
                               "",
@@ -583,6 +614,7 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string
                                   ),
                           ]
                         : []),
+                    ...renderRewrites(shapes),
                     "",
                     renderPlan(plan, { excluded }),
                 ].join("\n");
@@ -646,7 +678,7 @@ export function registerPlanTools(server: FastMCP, ctx: PlanToolContext): string
                 : `There is no plan with ID "${plan_id}". It may have expired or already been committed.`,
     });
 
-    return mutating;
+    return { mutating, planning };
 }
 
 /**
@@ -757,6 +789,39 @@ function linkingNotes(index: VaultIndex, path: string): Map<string, string[]> {
         byNote.set(link.path, targets);
     }
     return byNote;
+}
+
+/** How many distinct rewrites to print before saying how many are left. */
+const REWRITE_SAMPLE = 20;
+
+/**
+ * What the links will say afterwards, which is what a rename plan is for.
+ *
+ * The count alone was the whole of it until 31 July 2026: "rewrites 7 link(s)
+ * to point at X", with no way to see that `[[Peter Litzow]]` was about to
+ * become `[[Peter Litzow - 2026.pdf]]`. The refusal that sends people to this
+ * tool listed every affected link in full, so the recommendation showed more
+ * than the thing it recommended.
+ *
+ * Grouped by shape, because the answer to "what will they say" is usually two
+ * or three transformations however many notes are involved, and a plan that
+ * prints one line per link is a plan that gets scrolled past.
+ */
+function renderRewrites(shapes: Map<string, number>): string[] {
+    if (shapes.size === 0) return [];
+
+    const ordered = [...shapes.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const shown = ordered.slice(0, REWRITE_SAMPLE);
+    const total = ordered.reduce((sum, [, count]) => sum + count, 0);
+
+    return [
+        "",
+        `What the link text becomes (${total} link(s), ${shapes.size} distinct):`,
+        ...shown.map(([shape, count]) => `  ${shape}${count > 1 ? `  (x${count})` : ""}`),
+        ...(ordered.length > shown.length
+            ? [`  and ${ordered.length - shown.length} more distinct form(s), not shown.`]
+            : []),
+    ];
 }
 
 function excludedBlock(excluded: { path: string; reason: string }[]): string {

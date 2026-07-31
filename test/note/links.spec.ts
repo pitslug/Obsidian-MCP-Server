@@ -26,11 +26,21 @@ describe("retarget", () => {
         expect(retarget("Meetings/Notes", "Meetings/Notes.md", "Archive/Minutes.md")).toBe("Archive/Minutes");
     });
 
-    it("never drops an extension that is not .md", () => {
-        // Only `.md` can be left off a link, so a pdf keeps its extension
-        // whatever the old link looked like.
+    it("keeps an extension the link spelled out", () => {
         expect(retarget("Peter Litzow.pdf", "Interacts/Peter Litzow.pdf", "Archive/Pete.pdf")).toBe(
             "Pete.pdf"
+        );
+    });
+
+    it("leaves off an extension the link left off, whatever it is", () => {
+        // Until 31 July 2026 only `.md` came off here, because until then only
+        // a note could be named without its extension. Now that `[[Peter
+        // Litzow]]` resolves to a PDF, a rename that answered it with `[[Pete
+        // Litzow.pdf]]` would be editing somebody's style into their note, one
+        // link at a time, for no reason they asked for.
+        expect(retarget("Peter Litzow", "Interacts/Peter Litzow.pdf", "Archive/Pete.pdf")).toBe("Pete");
+        expect(retarget("Interacts/Peter Litzow", "Interacts/Peter Litzow.pdf", "Archive/Pete.pdf")).toBe(
+            "Archive/Pete"
         );
     });
 });
@@ -134,7 +144,24 @@ describe("rewriteLinkTargets", () => {
 
     it("does nothing when no target was given", () => {
         const out = rewrite("[[Notes]]", "Meetings/Notes.md", "Meetings/Minutes.md", []);
-        expect(out).toEqual({ text: "[[Notes]]", changed: 0 });
+        expect(out).toEqual({ text: "[[Notes]]", changed: 0, rewrites: [] });
+    });
+
+    it("reports each rewrite as the reader will see it", () => {
+        // The plan is a message, and a count is not one. Two links to the same
+        // file, differing only in the marker and the subpath, have to arrive as
+        // two different lines or the reader learns nothing from either.
+        const out = rewrite(
+            "[[Notes|the minutes]] and ![[Notes#Actions]]",
+            "Meetings/Notes.md",
+            "Archive/Minutes.md",
+            ["Notes"]
+        );
+
+        expect(out.rewrites).toEqual([
+            { before: "[[Notes|the minutes]]", after: "[[Minutes|the minutes]]" },
+            { before: "![[Notes#Actions]]", after: "![[Minutes#Actions]]" },
+        ]);
     });
 });
 
@@ -168,6 +195,24 @@ describe("choosing a target that actually resolves", () => {
         });
 
         expect(out.text).toBe("See [[Minutes]].");
+    });
+
+    it("leaves a link alone when the words it already has still point at the file", () => {
+        // A move that changes only the folder does not change what a basename
+        // means, so there is nothing to rewrite and a plan that claimed
+        // otherwise would be asking for consent to a change it is not making.
+        // It is also what keeps somebody's own capitalisation: `[[notes]]` is
+        // still `Archive/Notes.md` afterwards, so it stays as they wrote it.
+        const out = rewriteLinkTargets("See [[notes]] and [[Meetings/Notes]].", {
+            from: "Meetings/Notes.md",
+            to: "Archive/Notes.md",
+            targets: ["notes", "Meetings/Notes"],
+            paths: ["Archive/Notes.md"],
+        });
+
+        expect(out.text).toBe("See [[notes]] and [[Archive/Notes]].");
+        expect(out.changed).toBe(1);
+        expect(out.rewrites).toEqual([{ before: "[[Meetings/Notes]]", after: "[[Archive/Notes]]" }]);
     });
 });
 

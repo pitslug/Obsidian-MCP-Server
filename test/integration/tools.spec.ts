@@ -383,6 +383,30 @@ describe("search and curation", () => {
         expect(back).toContain("projects/house.md");
     });
 
+    it("says how each link is written, not only where it lands", async () => {
+        // The question somebody asks note_links before a rename is which words
+        // they would have to change, and until 31 July 2026 the words were the
+        // one thing it left out: resolved paths only, sorted by a target text
+        // that was never shown, so a note linking to one file three ways
+        // printed the same path three times with nothing to tell them apart.
+        const outgoing = textOf(
+            await client.callTool({ name: "note_links", arguments: { path: "projects/house.md" } })
+        );
+        expect(outgoing).toContain("[[daily/2026-07-28]] -> daily/2026-07-28.md");
+        expect(outgoing).toContain("[[nowhere]] -> UNRESOLVED");
+
+        const back = textOf(
+            await client.callTool({
+                name: "note_links",
+                arguments: { path: "daily/2026-07-28.md", direction: "backlinks" },
+            })
+        );
+        expect(back).toContain("projects/house.md: [[daily/2026-07-28]]");
+        // Asked for one direction, answered in one, with no blank line standing
+        // in for the section that was not printed.
+        expect(back.startsWith("Links to ")).toBe(true);
+    });
+
     it("reports broken links in the health check", async () => {
         const text = textOf(await client.callTool({ name: "vault_health", arguments: {} }));
         expect(text).toMatch(/Unresolved links \(\d+\)/);

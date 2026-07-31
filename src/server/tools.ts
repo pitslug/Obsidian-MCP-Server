@@ -44,6 +44,8 @@ export interface ToolContext {
      * places one of them went a day without `delete_note` in it.
      */
     writableTools: () => readonly string[];
+    /** The tools that compose a change and write nothing. Empty when read-only. */
+    planningTools: () => readonly string[];
     /**
      * The vault's conventions note as it was passed to clients at startup.
      *
@@ -136,6 +138,17 @@ export function registerTools(server: FastMCP, ctx: ToolContext): void {
                         ? "disabled (read-only), so no registered tool can modify the vault"
                         : `enabled (${ctx.writableTools().join(", ")})`
                 }`,
+                // On their own line, because they answer a different question
+                // and putting them in the one above would list tools that
+                // cannot write as though they could. Leaving them out was the
+                // previous choice: literally right, and it named commit_plan
+                // with nothing listed that could produce a plan for it.
+                ...(ctx.planningTools().length > 0
+                    ? [
+                          `Plans: ${ctx.planningTools().join(", ")} write nothing and return a plan ` +
+                              `for commit_plan to apply`,
+                      ]
+                    : []),
                 `Encryption: ${ctx.settings.encrypt ? "on" : "off"}` +
                     (ctx.settings.usePathObfuscation ? ", path obfuscation on" : ""),
                 `Index feed: ${
